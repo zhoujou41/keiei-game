@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>素材テスト（客1人・スタッフ1人）</title>
+<style>
+  body { margin: 0; background: #1c1f26; color: #eef0f4; font-family: sans-serif; }
+  #wrap { max-width: 800px; margin: 0 auto; padding: 12px; }
+  h1 { font-size: 1rem; font-weight: normal; color: #a3a9b8; }
+  #scene2-container { width: 100%; background: #12141a; border-radius: 10px; overflow: hidden; border: 1px solid #3a4050; }
+  #scene2-container svg { width: 100%; height: auto; display: block; }
+  #panels { display: flex; gap: 12px; margin-top: 10px; align-items: flex-start; }
+  #status { flex: 1 1 auto; min-width: 0; font-size: 0.85rem; color: #a3a9b8; white-space: pre-line; }
+  #hud { flex: 0 0 220px; background: #12141a; border: 1px solid #3a4050; border-radius: 10px; padding: 10px 14px; font-size: 0.85rem; }
+  #hud h2 { font-size: 0.8rem; font-weight: normal; color: #7d8494; margin: 0 0 8px; }
+  #hud .row { display: flex; justify-content: space-between; margin-bottom: 6px; }
+  #hud .row .label { color: #7d8494; }
+  #hud .row .value { color: #eef0f4; font-weight: bold; }
+  #hud .money .value { color: #7bd88f; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>chibi_restaurant_assets.zip 検証用: 客・スタッフの自律ループ</h1>
+  <div id="scene2-container"></div>
+  <div id="panels">
+    <div id="status">起動中…</div>
+    <div id="hud">
+      <h2>店舗状況</h2>
+      <div class="row"><span class="label">日付</span><span class="value" id="hud-date">-</span></div>
+      <div class="row"><span class="label">時刻</span><span class="value" id="hud-time">-</span></div>
+      <div class="row"><span class="label">本日の入店数</span><span class="value" id="hud-today">-</span></div>
+      <div class="row"><span class="label">週間入店数</span><span class="value" id="hud-week">-</span></div>
+      <div class="row money"><span class="label">所持金</span><span class="value" id="hud-money">-</span></div>
+    </div>
+  </div>
+</div>
+
+<script src="js/data/assetManifest.js"></script>
+<script src="js/core/actorFSM.js"></script>
+<script src="js/ui/actorSprite.js"></script>
+<script src="js/ui/sceneV2.js"></script>
+<script>
+  Game.UI.SceneV2.start(document.getElementById("scene2-container"));
+
+  // デバッグ用: 現在の状態をポーリングして画面下に表示（Playwright検証にも利用）
+  setInterval(function () {
+    var s = Game.UI.SceneV2.getDebugState();
+    var lines = [];
+    s.customers.forEach(function (c) { lines.push("customer[" + c.id + "]: " + c.state + " @ " + c.x + "," + c.y); });
+    s.staff.forEach(function (c) { lines.push("staff[" + c.id + "(" + c.role + ")]: " + c.state + " @ " + c.x + "," + c.y); });
+    document.getElementById("status").textContent = lines.join("\n");
+
+    var hud = Game.UI.SceneV2.getHudState();
+    document.getElementById("hud-date").textContent = hud.day + "日目";
+    document.getElementById("hud-time").textContent =
+      String(hud.hour).padStart(2, "0") + ":" + String(hud.minute).padStart(2, "0");
+    document.getElementById("hud-today").textContent = hud.todayCount + "人";
+    document.getElementById("hud-week").textContent = hud.weekCount + "人";
+    document.getElementById("hud-money").textContent = "¥" + hud.totalMoney.toLocaleString("ja-JP");
+  }, 250);
+</script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+# OS
+Thumbs.db
+desktop.ini
+ehthumbs.db
+.DS_Store
+
+# エディタ
+.vscode/
+.idea/
+
+# 購入版アセットパックの生データ（LimeZu Modern Interiors 等の第三者商用素材そのもの）。
+# ゲームが実際に読み込むのは assets/ 配下の切り出し済みPNGのみなので、
+# 生データ（zip・インストーラ等）はリポジトリに含めない。
+ModernItemInterior/
+
+# 過去の開発セッションで蓄積された作業ログ・スクリーンショット類（ゲーム本体とは無関係）
+Claude outputs/
+
+# 開発中の確認用デモ動画・キャプチャ・スクリーンショット（ゲーム本体では未使用）
+demo_*.gif
+verify_fix_demo.gif
+after_entrance_spacing.png
+after_full_view.png
+
+# 素材の作業用ソース（ゲームが実際に読み込むのは assets/ のみ。assets_src/ は未使用の下書き）
+assets_src/
+
+# 初期プロトタイピング時のスキャフォールディング（未使用）
+chibi_restaurant_assets_v2.zip
