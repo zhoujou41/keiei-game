@@ -27,3 +27,6 @@ assets_src/
 
 # 初期プロトタイピング時のスキャフォールディング（未使用）
 chibi_restaurant_assets_v2.zip
+
+# GitHub移行用に一時的に配置するgit bundleファイル（履歴取り込み後は削除してよい）
+*.bundle
