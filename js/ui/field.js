@@ -84,11 +84,28 @@ Game.UI = Game.UI || {};
   // 即座に消してしまうと、食事中の客が前触れなく一瞬で消えたように見えてしまう。
   // 残っている客が自然にいなくなるまで、次の日への進行を少し待たせるための状態。
   var waitingToAdvance = false;
+  // 2026-09-23（「1日の途中で再生速度が高速になる」修正）: 待機には2種類ある。
+  //   "natural" … その日のログを流し終えた後、残っている客が自然に退店し終えるのを
+  //               「プレイヤーが選んだ速度のまま」待つ（自動で次の日へ進むとき）。
+  //   "fast"    … 進捗バーのクリックや「⏭ 結果」など、プレイヤー自身が別の日へ
+  //               移動しようとしたときだけ、残りの客をCLEANUP_SPEED_MULTで早送りして片付ける。
+  // 以前は自動の日替わりでも毎回30倍速の早送りをしていたため、「ログが終わった途端に
+  // 客の動きが急に速くなる（＝1日の途中で再生速度が上がる）」ように見えていた。
+  var waitMode = null;
   var waitClearTimer = null;
   var pendingAfterWait = null; // 待機完了後に実行する関数（日付ジャンプ／週スキップ等、呼び出し元で内容が変わる）
   var WAIT_CLEAR_POLL_MS = 180;
-  var WAIT_CLEAR_TIMEOUT_MS = 15000; // 安全弁：万一いつまでも客が残り続ける不具合が
+  var WAIT_CLEAR_TIMEOUT_MS = 15000; // 安全弁（fast時、実時間）：万一いつまでも客が残り続ける不具合が
   // 起きても、次の日へ進めなくなって完全に詰んでしまうことが無いようにする上限。
+  var NATURAL_WAIT_TIMEOUT_GAME_MS = 120000; // 安全弁（natural時、ゲーム内時間＝倍速込み・一時停止中は進まない）
+
+  // 2026-09-23: ログ(beat)の進行を店内の実際の動きに合わせるための「待ち合わせ」。
+  // 料理がまだ届いていない客＋入口で順番待ちの客（Scene.backlog()）がこの人数を超えている間は、
+  // 次の演出付きbeatへ進まずに店内の動きが追いつくのを待つ。これにより、ログだけが先に
+  // 1日分終わってしまい、大量に残った客を早送りで片付ける、という状況自体が起きなくなる。
+  var GATE_MAX_BACKLOG = 0;
+  var GATE_POLL_MS = 100;
+  var GATE_MAX_WAIT_GAME_MS = 45000; // 安全弁：万一backlogが減らない不具合があっても進行が止まらないように
 
   function clearWaitToAdvance() {
     if (waitClearTimer) {
@@ -98,8 +115,7 @@ Game.UI = Game.UI || {};
     if (waitingToAdvance) {
       // 待機中に一時停止／結果スキップ等で中断された場合、ボタンの無効化状態や
       // 後片付け用の早送り速度が残ったままにならないよう明示的に戻す（見た目の
-      // ラベルはこの後の各処理のupdateNavButtons()/updatePlayButtonLabel()が
-      // 正しい状態に上書きする）。
+      // ラベルはこの後の各処理のupdatePlayButtonLabel()が正しい状態に上書きする）。
       var playBtn = el("field-btn-play");
       if (playBtn) playBtn.disabled = false;
       var barEl = el("field-progress-bar");
@@ -107,6 +123,7 @@ Game.UI = Game.UI || {};
       Game.UI.Scene.setSpeed(currentSpeed());
     }
     waitingToAdvance = false;
+    waitMode = null;
     pendingAfterWait = null;
   }
 
@@ -263,9 +280,11 @@ Game.UI = Game.UI || {};
 
   function updatePlayButtonLabel() {
     var btn = el("field-btn-play");
-    if (waitingToAdvance) return; // 待機表示中は他の描画処理でラベルを上書きしない
-    btn.textContent = playing ? "⏸ 一時停止" : "▶ 再生";
-    btn.classList.toggle("btn-primary", !playing);
+    if (waitMode === "fast") return; // 早送り待機表示中は他の描画処理でラベルを上書きしない
+    // natural待機中（残りの客の退店を通常速度で見守っている間）も「再生中」として扱い、一時停止できる
+    var active = playing || waitMode === "natural";
+    btn.textContent = active ? "⏸ 一時停止" : "▶ 再生";
+    btn.classList.toggle("btn-primary", !active);
   }
 
   var speedSelectWired = false;
@@ -318,20 +337,38 @@ Game.UI = Game.UI || {};
       dayFinished();
       return;
     }
-    var delay = (dayBeatDelays[playIndexInDay] || 480) / currentSpeed();
+    var delay = Math.max(MIN_BEAT_MS, (dayBeatDelays[playIndexInDay] || 480) / currentSpeed());
     playTimer = setTimeout(function () {
-      step();
-      scheduleStep();
+      playTimer = null;
+      stepWhenSceneReady(Game.UI.Scene.simClock());
     }, delay);
+  }
+
+  // 次のbeatが店内の演出を伴う場合、店内の動き（配膳待ち・入店待ちの客）が追いつくまで
+  // 待ってから実行する（GATE_MAX_BACKLOG参照）。待っている間も倍速設定はそのまま。
+  function stepWhenSceneReady(gateStartGameMs) {
+    if (!playing) return;
+    var beat = dayBeats[playIndexInDay];
+    var behind = beat && beat.action && Game.UI.Scene.backlog() > GATE_MAX_BACKLOG;
+    var gaveUp = Game.UI.Scene.simClock() - gateStartGameMs > GATE_MAX_WAIT_GAME_MS;
+    if (behind && !gaveUp) {
+      playTimer = setTimeout(function () {
+        playTimer = null;
+        stepWhenSceneReady(gateStartGameMs);
+      }, GATE_POLL_MS);
+      return;
+    }
+    step();
+    scheduleStep();
   }
 
   function play() {
     if (playing) return;
     if (waitingToAdvance) return; // 既に次の日への待機中
     if (playIndexInDay >= dayBeats.length) {
-      // この日は最後まで再生済み → 次の日へ（通常は自動進行で既にここへは来ないが、
-      // 手動で「▶ 再生」を押した場合の保険として維持）。
-      if (currentDay !== RESULT_DAY) nextDay();
+      // この日のログは最後まで再生済み（残りの客の退店待ちを一時停止していた場合など）
+      // → 残りの客を通常速度で見送ってから次の日へ。
+      if (currentDay !== RESULT_DAY) advanceToNextDayNaturally();
       return;
     }
     playing = true;
@@ -352,7 +389,7 @@ Game.UI = Game.UI || {};
   }
 
   function togglePlay() {
-    if (playing) {
+    if (playing || waitMode === "natural") {
       pause();
     } else {
       play();
@@ -363,7 +400,8 @@ Game.UI = Game.UI || {};
     mult = Game.Core.Random.clamp(parseInt(mult, 10) || 1, MIN_SPEED, MAX_SPEED);
     if (mult === speedMult) return;
     speedMult = mult;
-    Game.UI.Scene.setSpeed(currentSpeed());
+    // 早送りで片付け中（手動で日を移動しようとした直後）は、片付けが終わってから反映する
+    if (waitMode !== "fast") Game.UI.Scene.setSpeed(currentSpeed());
     updateSpeedSelect();
     if (playing) {
       // 次のstepから新しい間隔を反映させるため、いったん再スケジュール
@@ -397,7 +435,20 @@ Game.UI = Game.UI || {};
     if (currentDay === RESULT_DAY) {
       showResult();
     } else {
-      nextDay();
+      advanceToNextDayNaturally();
+    }
+  }
+
+  // 自動の日替わり：残っている客がいれば、プレイヤーが選んだ速度のまま退店し終えるのを
+  // 待ってから次の日へ進む（早送りはしない）。
+  function advanceToNextDayNaturally() {
+    var next = clampDay(currentDay + 1);
+    if (Game.UI.Scene.hasActiveCustomers()) {
+      waitForCustomersThenRun(function () {
+        jumpToDay(next);
+      }, "natural");
+    } else {
+      jumpToDay(next);
     }
   }
 
@@ -426,7 +477,7 @@ Game.UI = Game.UI || {};
       // この日は何も起きなかった（主に準備日=day0）。表示を止めずそのまま次の日へ
       // 進める（「月〜日を1回の開始で継続して流れるように」を、準備日でも崩さないため）。
       if (day !== RESULT_DAY) {
-        nextDay();
+        advanceToNextDayNaturally();
       } else {
         updatePlayButtonLabel();
       }
@@ -450,7 +501,10 @@ Game.UI = Game.UI || {};
   function requestJumpToDay(day) {
     day = clampDay(day);
     if (day === currentDay) return; // 今表示している日と同じなら何もしない（無意味な再生成・消失を防ぐ）
-    if (waitingToAdvance) return; // 既に別の切り替えを待機中（二重起動防止）
+    if (waitMode === "fast") return; // 既に別の手動切り替えを待機中（二重起動防止）
+    // 自動の日替わりで客の退店を通常速度で待っている最中に、プレイヤーが別の日を選んだ場合は
+    // その待機を取り消して、プレイヤーの指定を優先する。
+    if (waitMode === "natural") clearWaitToAdvance();
     // バグ修正9・補足: 手動ナビゲーションは、その日のbeatがまだ再生中でも押せてしまう。
     // ここでbeatの予約（field.js側のsetTimeoutループ）を止めずに客がいなくなるのを
     // 待ち始めると、待っている間も裏でその日の残りのbeatが引き続き送り込まれ続け、
@@ -466,53 +520,56 @@ Game.UI = Game.UI || {};
     if (Game.UI.Scene.hasActiveCustomers()) {
       waitForCustomersThenRun(function () {
         jumpToDay(day);
-      });
+      }, "fast");
     } else {
       jumpToDay(day);
     }
   }
 
-  function nextDay() {
-    requestJumpToDay(currentDay + 1);
-  }
-
-  // 2026-09-22（フィールド全面改修）: 「1日約8秒」を実現するためbeatの表示間隔を大幅に
-  // 詰めた結果、厨房（コック1名・COOK_TIME固定）の処理能力を大きく上回るペースでbeatが
-  // 送り込まれ、日替わりのたびに残った客が捌け切るまでの待ち時間が非常に長くなる
-  // （最悪、安全弁のWAIT_CLEAR_TIMEOUT_MSに毎回引っかかる）現象が生じた。この待ち時間は
-  // 通常のbeat再生ペース（DAY_TARGET_MS）とは独立した「後片付け専用の早送り」なので、
-  // 大きく引き上げても「1日8秒」の体感には影響しない。
-  var CLEANUP_SPEED_MULT = 30; // 残っている客の後片付け中だけ使う早送り倍率
+  // 手動で日を移動する（進捗バーのクリック・「⏭ 結果」）ときだけ使う、残りの客の
+  // 後片付け専用の早送り倍率。自動の日替わりでは使わない（2026-09-23修正、waitMode参照）。
+  var CLEANUP_SPEED_MULT = 30;
 
   // 客が画面からいなくなるまで（またはタイムアウトするまで）待ってから afterFn() を
   // 実行する。日付ジャンプ・週スキップなど「今いる客を問答無用に消す」処理の手前に
   // 挟むことで、食事中・移動中の客が前触れなく一瞬で消えて見えることを防ぐ（共通化）。
-  function waitForCustomersThenRun(afterFn) {
+  // mode: "natural"（自動の日替わり。プレイヤーが選んだ速度のまま待つ・一時停止可）
+  //       "fast"（手動の日移動。早送りで片付ける）
+  function waitForCustomersThenRun(afterFn, mode) {
     waitingToAdvance = true;
+    waitMode = mode === "fast" ? "fast" : "natural";
     pendingAfterWait = afterFn;
-    var waitStart = Date.now();
+    var fast = waitMode === "fast";
+    var waitStartReal = Date.now();
+    var waitStartGame = Game.UI.Scene.simClock();
     var playBtn = el("field-btn-play");
-    if (playBtn) {
-      playBtn.disabled = true;
-      playBtn.textContent = "⏳ 退店をお待ちください…";
-      playBtn.classList.remove("btn-primary");
-    }
     var barEl = el("field-progress-bar");
-    if (barEl) barEl.style.pointerEvents = "none"; // 待機中は進捗バーでの二重切り替えも防ぐ
+    if (fast) {
+      if (playBtn) {
+        playBtn.disabled = true;
+        playBtn.textContent = "⏳ 退店をお待ちください…";
+        playBtn.classList.remove("btn-primary");
+      }
+      if (barEl) barEl.style.pointerEvents = "none"; // 待機中は進捗バーでの二重切り替えも防ぐ
+    } else {
+      updatePlayButtonLabel(); // 「⏸ 一時停止」のまま（押せば退店待ちごと一時停止できる）
+    }
     // タイマー/アニメーションループが止まっていると客がいつまでも退店し終わらないため、
-    // 明示的に一時停止中だった場合でも動かしておく。加えて、この「後片付け」区間だけは
-    // プレイヤーの体感速度を損なわないよう、大きく早送りして一気に片付ける
+    // 明示的に動かしておく。早送りはプレイヤーが手動で日を移動したときだけ
     // （経済シミュレーション側の結果には一切影響しない。見た目の演出速度だけの変更）。
     Game.UI.Scene.resume();
-    Game.UI.Scene.setSpeed(CLEANUP_SPEED_MULT);
+    Game.UI.Scene.setSpeed(fast ? CLEANUP_SPEED_MULT : currentSpeed());
 
     function poll() {
       if (!waitingToAdvance) return; // pause()等で途中キャンセルされた
       var cleared = !Game.UI.Scene.hasActiveCustomers();
-      var timedOut = Date.now() - waitStart > WAIT_CLEAR_TIMEOUT_MS;
+      var timedOut = fast
+        ? Date.now() - waitStartReal > WAIT_CLEAR_TIMEOUT_MS
+        : Game.UI.Scene.simClock() - waitStartGame > NATURAL_WAIT_TIMEOUT_GAME_MS;
       if (cleared || timedOut) {
         var run = pendingAfterWait;
         waitingToAdvance = false;
+        waitMode = null;
         pendingAfterWait = null;
         waitClearTimer = null;
         if (playBtn) playBtn.disabled = false;
@@ -529,14 +586,15 @@ Game.UI = Game.UI || {};
   // 「⏭ 結果」も、曜日ナビゲーションと同じく客が画面からいなくなるまで待ってから
   // 実行する（requestJumpToDayと対になるガード付きの入り口）。
   function requestSkipToEnd() {
-    if (waitingToAdvance) return; // 既に別の切り替えを待機中（二重起動防止）
+    if (waitMode === "fast") return; // 既に別の手動切り替えを待機中（二重起動防止）
+    if (waitMode === "natural") clearWaitToAdvance(); // 自動の日替わり待ちより、プレイヤーの指定を優先
     playing = false;
     if (playTimer) {
       clearTimeout(playTimer);
       playTimer = null;
     }
     if (Game.UI.Scene.hasActiveCustomers()) {
-      waitForCustomersThenRun(performSkipToEnd);
+      waitForCustomersThenRun(performSkipToEnd, "fast");
     } else {
       performSkipToEnd();
     }
@@ -607,12 +665,13 @@ Game.UI = Game.UI || {};
     ensureScene();
     allBeats = beats || [];
     currentResult = result;
-    speedMult = 1;
+    clearWaitToAdvance(); // 前の週の待機状態が残っていれば破棄
+    // 2026-09-23: 選んだ再生速度は週をまたいでも維持する（毎週x1に戻さない）。
     updateSpeedSelect();
-    Game.UI.Scene.setSpeed(currentSpeed());
     groupBeatsByDay();
     precomputeItemStats();
-    Game.UI.Scene.startWeek(Game.App.state.layout);
+    Game.UI.Scene.startWeek(Game.App.state.layout); // ※startWeekはシーン側の倍率を1に戻すので、この後で設定する
+    Game.UI.Scene.setSpeed(currentSpeed());
     jumpToDay(0);
   }
 
@@ -634,5 +693,12 @@ Game.UI = Game.UI || {};
     skipToEnd: requestSkipToEnd,
     nextTurn: nextTurn,
     renderIdle: renderIdle,
+    // 検証用（自動テストから再生状態を参照するためだけに使う。通常プレイでは使わない）
+    __debugState: function () {
+      return {
+        waitMode: waitMode, playing: playing, currentDay: currentDay,
+        playIndexInDay: playIndexInDay, dayBeatCount: dayBeats.length, speed: speedMult,
+      };
+    },
   };
 })();

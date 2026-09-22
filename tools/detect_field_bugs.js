@@ -3,7 +3,9 @@
 //   SPEED=1 WEEKS=1 node tools/detect_field_bugs.js    （x1で1週）
 //   SPEED=20 WEEKS=2 node tools/detect_field_bugs.js   （x20で2週）
 // 毎フレーム全キャラの座標・表示中のコマ画像を記録し、重なり（二重表示）・出口以外での消滅・
-// 進行方向と向きの不一致・持ち主のいない吹き出しを数える。scene.jsのwindow.__SCENE_DEBUGフックを使う。
+// 進行方向と向きの不一致・持ち主のいない吹き出し・選んだ倍率以外への再生速度の変化を数える。
+// scene.jsのwindow.__SCENE_DEBUGフックを使う。
+// ※2026-09-23以降、x1では店内の動きを省略せず見せるため1週に5分前後かかる。
 // playwrightのchromium実行ファイルのパスは環境に合わせて変更すること。
 // 2026-09-22: FIELD画面の速度指定がボタン巡回（#field-btn-speed）から1〜20倍速の
 // セレクトボックス（#field-speed-select）に変更されたため、SPEED_CLICKS（クリック回数）
@@ -63,6 +65,7 @@ async function setupGame(page) {
         const shownDir = m ? m[1] : null;
         const p = S.prev[e.id];
         let actual = null;
+        let mis = false;
         if (p && href) {
           const dx = e.x - p.x, dy = e.y - p.y;
           const d = Math.hypot(dx, dy);
@@ -70,16 +73,23 @@ async function setupGame(page) {
           // さらに前回も同じ向きに進んでいた（=角を曲がった瞬間ではない）場合のみ。
           if (d > 1.0 && d < 60 && (Math.abs(dx) < 0.5 || Math.abs(dy) < 0.5)) {
             actual = dirOf(dx, dy);
-            // 到着したフレーム（テーブルの方を向き直る）と、前の人を待って止まっている状態は除外
-            if (p.dir === actual && e.path && e.path.length > 0 && !e.blockedByLeader) {
+            // 到着したフレーム（テーブルの方を向き直る）と、前の人を待って止まっている状態は除外。
+            // また、このフレームでちょうど曲がり角（マスの中心、64px格子の32+64k）に着いて
+            // 次の区間の向きへ振り向いた瞬間も除外する（正常な動作。高倍速ほど頻繁に起きる）。
+            const nearCenter = (v) => Math.abs(((v - 32) % 64 + 64) % 64) < 1.0 || Math.abs(((v - 32) % 64 + 64) % 64 - 64) < 1.0;
+            const atCorner = nearCenter(e.x) && nearCenter(e.y);
+            if (p.dir === actual && e.path && e.path.length > 0 && !e.blockedByLeader && !atCorner) {
               S.dirChecks++;
-              if (actual !== shownDir) {
+              mis = actual !== shownDir;
+              // 2026-09-23: 1フレームの中で折り返した瞬間（テーブルで料理を渡して引き返す等）は
+              // 正常な動作なので、2フレーム続けて向きが食い違った場合だけ不具合として数える。
+              if (mis && p.mis) {
                 S.dirMismatch.push(S.dirMismatch.length < 30 ? { id: e.id, kind: e.kind, actual, shownDir, dx: +dx.toFixed(1), dy: +dy.toFixed(1), phase: e.phase, entDir: e.direction, role: e.role, pathLen: e.path.length, tgt: [Math.round(e.path[0].x), Math.round(e.path[0].y)], pos: [+e.x.toFixed(1), +e.y.toFixed(1)], pa: e.pendingAction, holding: e.holdingIcon } : null);
               }
             }
           }
         }
-        S.prev[e.id] = { x: e.x, y: e.y, dir: actual };
+        S.prev[e.id] = { x: e.x, y: e.y, dir: actual, mis: mis };
         if (!e.isFixtureStaff) cust.push(e);
       }
       let ov = false;
@@ -106,6 +116,17 @@ async function setupGame(page) {
       requestAnimationFrame(loop);
     }
     requestAnimationFrame(loop);
+    // 2026-09-23追加：自動再生中に「プレイヤーが選んだ倍率」以外へシーンの再生速度が
+    // 変わった回数（＝1日の途中で急に速くなる不具合の検出）。手動の日移動をしない
+    // このスクリプトでは0であるべき。
+    S.speedChanges = [];
+    const origSetSpeed = Game.UI.Scene.setSpeed;
+    Game.UI.Scene.setSpeed = function (m) {
+      const sel = document.getElementById('field-speed-select');
+      const chosen = sel ? parseInt(sel.value, 10) : 1;
+      if (m !== chosen) S.speedChanges.push({ to: m, chosen });
+      return origSetSpeed.apply(this, arguments);
+    };
   });
 
   for (let w = 0; w < WEEKS; w++) {
@@ -114,7 +135,7 @@ async function setupGame(page) {
     if (SPEED !== 1) await page.selectOption('#field-speed-select', String(SPEED));
     let done = false;
     const t0 = Date.now();
-    while (!done && Date.now() - t0 < 180000) {
+    while (!done && Date.now() - t0 < 900000) {
       await page.waitForTimeout(1000);
       done = await page.$eval('#field-result', el => el.classList.contains('show')).catch(() => false);
     }
@@ -137,6 +158,7 @@ async function setupGame(page) {
       overlapFrames: S.overlapFrames, overlapPairs: overlapList.length, overlapSamples: overlapList.slice(0, 10),
       despawnTotal: log.filter(d => d.kind === 'customer').length,
       vanishedAwayFromExit: vanished.length, vanishedByPhase: byPhase, vanishSamples: vanished.slice(0, 8),
+      unexpectedSpeedChanges: S.speedChanges.length, speedChangeSamples: S.speedChanges.slice(0, 5),
     };
   });
   console.log(JSON.stringify(r, null, 1));

@@ -649,6 +649,63 @@ Game.UI = Game.UI || {};
     }
   }
 
+  // 2026-09-23追加（「二重に表示」— 狭い通路での正面衝突）: 自動の日替わりで30倍速の
+  // 早送りをやめ、客の出入りを通常速度で見せるようになったことで、「店に入ってくる客」と
+  // 「帰る客（レジ・出口へ向かう客）」が1マス幅の通路で向かい合ってすれ違う（＝重なって
+  // 見える）場面が目に見えるようになった（以前は早送りで1フレームで通り過ぎていたため
+  // 目立たず、自動検出にもかからなかった）。1マス幅の通路では、どちらかが立ち止まっても
+  // もう片方がその上を通るしかないため、「歩き出す前に」判定する：これから歩く経路を、
+  // 逆向きに歩いてくる客が今まさに通っている場合は、その客が通り過ぎるまで歩き出さない。
+  // 待っている客は「歩いている客」として扱われないので、互いに待ち合って固まることはない。
+  var HEADON_RETRY_MS = 120;
+  var HEADON_MAX_WAIT_MS = 12000; // 安全弁（ゲーム内時間）。入店時はゆっくり歩く（ENTRANCE_WALK_SPEED）ので長めに取る
+
+  function cellKeyOf(c) {
+    return c.x + "," + c.y;
+  }
+
+  // pathCells（グリッドのマス配列、先頭が現在地）を、逆向きに歩いている他の客がいるか。
+  function hasOpposingTraffic(ent, pathCells) {
+    if (!pathCells || pathCells.length < 2) return false;
+    var myIdx = {};
+    pathCells.forEach(function (c, i) {
+      myIdx[cellKeyOf(c)] = i;
+    });
+    for (var id in entities) {
+      var o = entities[id];
+      if (o === ent || o.kind !== "customer" || o.hiddenAtDoor || !o.path || o.path.length === 0) continue;
+      var q = [nearestCell(o.x, o.y)].concat(
+        o.path.map(function (p) {
+          return nearestCell(p.x, p.y);
+        })
+      );
+      var prev = -1;
+      for (var i = 0; i < q.length; i++) {
+        var idx = myIdx[cellKeyOf(q[i])];
+        if (idx === undefined) continue;
+        if (prev !== -1 && idx < prev) return true; // 相手は自分の経路を逆向きにたどっている
+        prev = idx;
+      }
+    }
+    return false;
+  }
+
+  // 逆向きの客が通り過ぎるのを待ってから、経路を歩き始める（客専用）。
+  function walkWhenClear(ent, pathCells, onArrive, waitedMs) {
+    waitedMs = waitedMs || 0;
+    if (!entities[ent.id]) return;
+    if (waitedMs < HEADON_MAX_WAIT_MS && hasOpposingTraffic(ent, pathCells)) {
+      ent.timer = HEADON_RETRY_MS;
+      ent.pendingAction = "retry_walk";
+      ent._retryWalk = function () {
+        walkWhenClear(ent, pathCells, onArrive, waitedMs + HEADON_RETRY_MS);
+      };
+      return;
+    }
+    ent._retryWalk = null;
+    setPath(ent, pathCells, onArrive);
+  }
+
   function directionFromDelta(dx, dy) {
     if (Math.abs(dx) > Math.abs(dy)) return dx >= 0 ? "right" : "left";
     return dy >= 0 ? "down" : "up";
@@ -889,7 +946,7 @@ Game.UI = Game.UI || {};
     var startCell = nearestCell(customerEnt.x, customerEnt.y);
     var path = pathBetween(startCell, registerPoint);
     customerEnt.phase = "paying";
-    setPath(customerEnt, path, function () {
+    walkWhenClear(customerEnt, path, function () {
       var jitter = registerJitter();
       customerEnt.x = registerPoint.x + jitter.dx;
       customerEnt.y = registerPoint.y + jitter.dy;
@@ -924,7 +981,7 @@ Game.UI = Game.UI || {};
     var startCell = nearestCell(customerEnt.x, customerEnt.y);
     var path = pathBetween(startCell, entrance);
     var beginWalk = function () {
-      setPath(customerEnt, path, function () {
+      walkWhenClear(customerEnt, path, function () {
         despawnEntity(customerEnt);
       });
     };
@@ -1044,14 +1101,16 @@ Game.UI = Game.UI || {};
     return cellCenter(entrance.x, entrance.y);
   }
 
-  function enqueueAtDoor(ent, beginWalk) {
+  // pathCells（省略可）: 入口から歩く予定の経路。逆向きに歩いてくる客がいる間は入れない
+  // （hasOpposingTraffic参照。2026-09-23追加）。
+  function enqueueAtDoor(ent, beginWalk, pathCells) {
     var ep = entrancePixel();
     ent.x = ep.x;
     ent.y = ep.y;
     ent.hiddenAtDoor = true;
     ent.g.setAttribute("visibility", "hidden");
     ent.g.setAttribute("transform", "translate(" + ent.x + "," + (ent.y + ENTITY_VISUAL_Y_OFFSET) + ")");
-    doorQueue.push({ ent: ent, beginWalk: beginWalk });
+    doorQueue.push({ ent: ent, beginWalk: beginWalk, path: pathCells || null, blockedSinceMs: null });
   }
 
   function removeFromDoorQueue(ent) {
@@ -1083,6 +1142,10 @@ Game.UI = Game.UI || {};
       }
       if (simClockMs < lastEntranceWalkStartMs + ENTER_STAGGER_MS) return;
       if (!doorIsClear()) return;
+      if (head.path && hasOpposingTraffic(head.ent, head.path)) {
+        if (head.blockedSinceMs === null) head.blockedSinceMs = simClockMs;
+        if (simClockMs - head.blockedSinceMs < HEADON_MAX_WAIT_MS) return;
+      }
       doorQueue.shift();
       lastEntranceWalkStartMs = simClockMs;
       head.ent.hiddenAtDoor = false;
@@ -1149,7 +1212,7 @@ Game.UI = Game.UI || {};
         settleAtTable(c, tableCenterCell);
       });
     };
-    enqueueAtDoor(c, beginWalk); // バグ修正19：入口の外で1列に並び、入口が空いたら1人ずつ入る
+    enqueueAtDoor(c, beginWalk, path); // バグ修正19：入口の外で1列に並び、入口が空いたら1人ずつ入る
   }
 
   // ================= 満席時の待機列（入口の外で待つ客） =================
@@ -1263,7 +1326,7 @@ Game.UI = Game.UI || {};
     c.speed = ENTRANCE_WALK_SPEED; // 外待ち列からの案内もゆっくり歩かせる
     var startCell = nearestCell(c.x, c.y);
     var path = pathBetween(startCell, seat);
-    setPath(c, path, function () {
+    walkWhenClear(c, path, function () {
       settleAtTable(c, tableCenterCell);
     });
   }
@@ -1361,6 +1424,16 @@ Game.UI = Game.UI || {};
         // 対処：客が本当に席（または待機列の立ち位置）に着いて止まるまで、ウェイターは
         // 料理を持ったままその場で待ち、着いてから手渡す。
         waitForCustomerThenDeliver(ent, job, function () {
+          // 2026-09-23（「1日の途中で再生速度が高速になる」修正の一環）: 以前は1皿届けるたびに
+          // 必ずレジ横の持ち場へ戻ってから次の皿を取りに行っていたため、ウェイター1人あたり
+          // 1皿に6〜10秒かかり、店内の動きがログの進行に大きく遅れていた（その遅れを
+          // 日の終わりに30倍速で片付けていたのが「途中で急に速くなる」原因）。
+          // カウンターに次の料理が既に出来上がっていれば、持ち場に戻らずそのまま取りに行く。
+          var nextJob = takeNextReadyJob();
+          if (nextJob) {
+            dispatchWaiterJob(waiter, nextJob);
+            return;
+          }
           var backCell = nearestCell(ent.x, ent.y);
           var homePath = pathBetween(backCell, homeCell);
           setPath(ent, homePath, function () {
@@ -1376,6 +1449,7 @@ Game.UI = Game.UI || {};
     if (c.hiddenAtDoor) return false;
     if (c.path && c.path.length > 0) return false;
     if (c._beginWalk) return false; // 歩き出しの予約待ち
+    if (c.pendingAction === "retry_walk") return false; // すれ違い待ちで歩き出す直前
     return true;
   }
 
@@ -1418,6 +1492,15 @@ Game.UI = Game.UI || {};
     attempt();
   }
 
+  // カウンターに置かれている料理のうち、まだ届け先の客がいるものを1つ取り出す（いなければnull）
+  function takeNextReadyJob() {
+    while (readyQueue.length > 0) {
+      var job = readyQueue.shift();
+      if (job.customer && entities[job.customer.id]) return job;
+    }
+    return null;
+  }
+
   function processWaiters() {
     while (readyQueue.length > 0) {
       var waiter = findFreeWaiter();
@@ -1448,6 +1531,12 @@ Game.UI = Game.UI || {};
     } else if (action === "leave_from_loiter") {
       ent.phase = "disappointed_leaving";
       sendToExit(ent, true);
+    } else if (action === "retry_walk") {
+      if (ent._retryWalk) {
+        var rw = ent._retryWalk;
+        ent._retryWalk = null;
+        rw();
+      }
     } else if (action === "waiter_retry") {
       if (ent._retry) {
         var retry = ent._retry;
@@ -1540,21 +1629,33 @@ Game.UI = Game.UI || {};
   }
 
   // ================= メインループ（常時稼働。beatの進行とは独立） =================
+  // 2026-09-23: 再生速度を最大20倍まで選べるようにしたことで、1フレームあたりの移動量が
+  // 70px以上（客同士の最低間隔FOLLOW_MIN_SEP=34pxの2倍以上）になり、「前の客に追いついたら
+  // 待つ」判定の間をすり抜けて重なることがあった（x20・2週で1組を検出）。1フレームの
+  // ゲーム内時間がこの値を超える場合は、細かく分割して複数回に分けて進める（描画は最後の1回だけ）。
+  // 何倍速でも、1倍速と同じ細かさで入店・配膳・追従の判定が行われる。
+  var MAX_SUBSTEP_SEC = 0.034;
+
   function tick(now) {
     if (!running) return;
     var dt = Math.min(0.12, (now - lastFrameTime) / 1000) * speedMult;
     lastFrameTime = now;
 
-    simClockMs += dt * 1000;
+    var steps = Math.max(1, Math.ceil(dt / MAX_SUBSTEP_SEC));
+    var sub = dt / steps;
+    for (var i = 0; i < steps; i++) {
+      var render = i === steps - 1;
+      simClockMs += sub * 1000;
 
-    processDoorQueue(); // バグ修正19：入口が空いていれば順番待ちの客を1人入れる
-    processKitchen();
-    processWaiters();
-    updateMoneyPopups(dt);
+      processDoorQueue(); // バグ修正19：入口が空いていれば順番待ちの客を1人入れる
+      processKitchen();
+      processWaiters();
+      updateMoneyPopups(sub);
 
-    Object.keys(entities).forEach(function (id) {
-      updateEntity(entities[id], dt);
-    });
+      Object.keys(entities).forEach(function (id) {
+        updateEntity(entities[id], sub, render);
+      });
+    }
 
     rafHandle = requestAnimationFrame(tick);
   }
@@ -1600,7 +1701,7 @@ Game.UI = Game.UI || {};
     return false;
   }
 
-  function updateEntity(ent, dt) {
+  function updateEntity(ent, dt, render) {
     // バグ修正21（「消える」の見た目の原因の一つ・吹き出しの取り残し）: 同じフレーム内で
     // 他の客の処理（席が空いた→待機列から案内、など）によって既に画面から消された
     // entityに対しては何もしない。
@@ -1685,6 +1786,7 @@ Game.UI = Game.UI || {};
     // despawnEntityで消したはずの吹き出し（👋など）がその場に作り直され、持ち主のいない
     // アイコンだけが入口に残り続けていた（＝人だけが突然消えたように見える）。
     if (!entities[ent.id]) return;
+    if (render === false) return; // 1フレームを分割して進めている途中（描画はそのフレームの最後にまとめて行う）
     redrawEntity(ent);
     ent.g.setAttribute("transform", "translate(" + ent.x + "," + (ent.y + ENTITY_VISUAL_Y_OFFSET) + ")");
     if (ent.dishEl) ent.dishEl.setAttribute("transform", "translate(" + ent.x + "," + (ent.y + ENTITY_VISUAL_Y_OFFSET - CELL * 0.32) + ")");
@@ -1843,6 +1945,26 @@ Game.UI = Game.UI || {};
     });
   }
 
+  // 2026-09-23追加（「1日の途中で再生速度が高速になる」修正）: 店内アニメーションが
+  // ログ(beat)の進行にどれだけ遅れているかの目安。「配膳の指示は出たが、まだ料理が
+  // 届いていない客（調理待ち・受け渡し待ち）」と「入口の外で入店の順番を待っている客」の
+  // 人数の合計。field.jsはこの値が大きい間は次のbeatへ進まずに待つことで、ログの進み方を
+  // 店内の実際の動きに合わせる（＝ログだけ先に終わって、残りを早送りで片付ける必要を無くす）。
+  function backlog() {
+    var n = doorQueue.length;
+    for (var id in entities) {
+      var e = entities[id];
+      if (e.kind === "customer" && e.phase === "cooking_wait") n++;
+    }
+    return n;
+  }
+
+  // 現在のゲーム内時間（tick()のdtを倍速込みで積算した値、ms）。
+  // field.jsが「待ちの安全弁」を実時間ではなくゲーム内時間で測るために使う。
+  function simClock() {
+    return simClockMs;
+  }
+
   Game.UI.Scene = {
     init: init,
     startWeek: startWeek,
@@ -1855,6 +1977,8 @@ Game.UI = Game.UI || {};
     clear: clear,
     renderIdle: renderIdle,
     hasActiveCustomers: hasActiveCustomers,
+    backlog: backlog,
+    simClock: simClock,
     // 検証用（自動テストから現在のエンティティ・出口座標を参照するためだけに使う）
     __debugEntities: function () { return entities; },
     __debugEntrance: function () { return entrance ? cellCenter(entrance.x, entrance.y) : null; },
