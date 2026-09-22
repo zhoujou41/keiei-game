@@ -49,7 +49,12 @@ Game.UI = Game.UI || {};
 
 (function () {
   var CELL = 64; // 1マスあたりの表示ピクセル（歩行可否等のロジック用グリッドとは独立した表示専用の値）
-  var WALK_SPEED = 3.6; // マス/秒
+  var WALK_SPEED = 3.6; // マス/秒（配膳・退店など通常の動きはこちらのまま＝「速く動く箇所」）
+  // 2026-09-22（客の入店後の動き調整）: 「客が来た後の動きが速すぎる」との指摘を受け、
+  // 入店直後（入口→席、または外待ち列→席）の歩行だけを大きく遅くした（＝「ゆっくり
+  // 動かす箇所」）。配膳（ウェイターの往復）・退店・怒って帰る動き等、他の動きは
+  // これまで通りWALK_SPEED（＋ANGRY_SPEED_MULT）のまま、変更していない。
+  var ENTRANCE_WALK_SPEED = WALK_SPEED * 0.45;
   var ANGRY_SPEED_MULT = 1.5; // 怒って帰る時は早歩き
   var ANIM_CAP_ENTER = 4; // 1beatあたり実際にアニメーションさせる客の上限（多すぎると見づらいため）
   var ANIM_CAP_LEAVE = 3;
@@ -66,7 +71,19 @@ Game.UI = Game.UI || {};
   // 最低でもこの間隔だけ空ける（バグ修正11で、この間隔保証をbeat単位ではなく
   // scheduleEntranceWalk()によるゲーム内時間ベースのグローバルな保証に変更した。
   // 詳しい経緯はscheduleEntranceWalk()直前のコメント参照）。
-  var ENTER_STAGGER_MS = 260; // 入口から歩き出す客同士の最低間隔（グローバル）
+  var ENTER_STAGGER_MS = 400; // 入口から歩き出す客同士の最低間隔（グローバル）
+  // バグ修正19（「二重に表示」のロジック側の原因）: 毎フレーム全キャラの座標を記録する
+  // 自動検出で、同じ通路（入口の行など）を歩く客同士が12px未満まで重なったまま
+  // 数フレーム以上一緒に歩くケースが1週間で31組見つかった。入口での立ち位置のずれ
+  // （entranceJitter）が歩き出しの時間差より大きいため、後から歩き出した客が先の客に
+  // 追いついて同じ座標に重なっていた（#56で入店直後の歩行を遅くしたことで時間差が
+  // 距離に換算して短くなり、さらに起きやすくなっていた）。
+  // 対処：歩いている客は、自分より先に登場した（seqが小さい）「歩いている客」が
+  // 進行方向の前方FOLLOW_MIN_SEP以内にいる間は、その場で待つ（追い越さない）。
+  // 譲る相手は必ず自分より古い客だけなので、互いに譲り合って止まる（デッドロック）
+  // ことは起きない。万一のため、FOLLOW_MAX_WAIT_MS待っても前が空かなければ進む。
+  var FOLLOW_MIN_SEP = 34;
+  var FOLLOW_MAX_WAIT_MS = 1500;
   // （入口でのjitter半径はバグ修正10でentranceJitter()内の段階的な値に変更したため、
   // ここでの固定半径の定数は廃止した）
   // 2026-09-21 バグ修正5（「椅子に座る位置がずれています」バグ）: 什器（椅子・卓など）は
@@ -269,13 +286,17 @@ Game.UI = Game.UI || {};
     if (!counterPoint) counterPoint = stovePoints[0];
     if (!registerPoint) registerPoint = entrance;
 
-    var deeper = Game.Core.Pathfind.findAdjacentWalkable(entrance.x, entrance.y, walkableFn, layout.cols, layout.rows);
-    loiterPoint = deeper.length > 0 ? deeper[0] : entrance;
+    // バグ修正19：売り切れで諦める客は、以前は入口の隣のマス（＝店内の通路そのもの）まで
+    // 入って立ち止まっていたため、そこを通る客や、同時に諦めた別の客と重なっていた。
+    // 入口に顔を出して🚫を見せ、そのまま引き返す演出にする（入口に人がいる間は
+    // doorIsClear()により次の客が入らないので重ならない）。
+    loiterPoint = entrance;
     // 入口の外で待つ客の立ち位置の基準点（入口セルより少し店内寄り＝入口のすぐ手前）。
     var ec0 = cellCenter(entrance.x, entrance.y);
     outsideQueueAnchor = { x: ec0.x, y: ec0.y - CELL * 1.15 };
     outsideQueue = [];
     outsideOverflowCount = 0;
+    doorQueue = [];
     outsideWaitSpawnSeq = 0;
     if (queueBadgeEl) {
       queueBadgeEl.setAttribute("transform", "translate(" + (ec0.x + CELL * 0.95) + "," + (ec0.y - CELL * 0.55) + ")");
@@ -495,10 +516,14 @@ Game.UI = Game.UI || {};
 
   // ================= エンティティ管理 =================
   function spawnEntity(kind, look, gridStart, role) {
-    var id = "e" + entitySeq++;
+    var seq = entitySeq++;
+    var id = "e" + seq;
     var p = cellCenter(gridStart.x, gridStart.y);
     var ent = {
       id: id,
+      seq: seq,
+      followWaitMs: 0,
+      blockedByLeader: false,
       kind: kind,
       look: look,
       role: role || null,
@@ -546,6 +571,13 @@ Game.UI = Game.UI || {};
       ent.seatRef = null;
       freedASeat = true;
     }
+    // 検証用フック（通常プレイでは無効。自動テストでwindow.__SCENE_DEBUG=trueのときだけ記録）
+    if (window.__SCENE_DEBUG) {
+      (window.__sceneDespawnLog = window.__sceneDespawnLog || []).push({
+        id: ent.id, kind: ent.kind, phase: ent.phase, x: ent.x, y: ent.y,
+        moving: !!(ent.path && ent.path.length), fixture: !!ent.isFixtureStaff, t: performance.now(),
+      });
+    }
     if (ent.g && ent.g.parentNode) ent.g.parentNode.removeChild(ent.g);
     clearDish(ent);
     clearBubble(ent);
@@ -562,7 +594,7 @@ Game.UI = Game.UI || {};
   }
 
   function computeAnimKind(ent) {
-    var moving = ent.path && ent.path.length > 0;
+    var moving = ent.path && ent.path.length > 0 && !ent.blockedByLeader;
     if (ent.kind === "customer") {
       if (moving) return AnimationKind.WALK;
       // 2026-09-22（レイアウト改修）: 椅子・着席動作を廃止したため、客は常に立ったまま
@@ -880,9 +912,17 @@ Game.UI = Game.UI || {};
   function sendToExit(customerEnt, speedBoost) {
     // バグ修正7: sendToRegisterThenExitと同様、席はここでは空けない
     // （despawnEntityで実際に画面から消える時に空ける）。
+    // バグ修正19：まだ入口の外に並んでいて店内に姿を見せていない客は、そのまま帰らせる
+    // （中に入れてから引き返させると、入口で他の客と重なる原因になる）。
+    if (customerEnt.hiddenAtDoor) {
+      removeFromDoorQueue(customerEnt);
+      despawnEntity(customerEnt);
+      return;
+    }
+    customerEnt.exitingToDoor = true;
+    customerEnt.speed = speedBoost ? WALK_SPEED * ANGRY_SPEED_MULT : WALK_SPEED;
     var startCell = nearestCell(customerEnt.x, customerEnt.y);
     var path = pathBetween(startCell, entrance);
-    if (speedBoost) customerEnt.speed = WALK_SPEED * ANGRY_SPEED_MULT;
     var beginWalk = function () {
       setPath(customerEnt, path, function () {
         despawnEntity(customerEnt);
@@ -984,6 +1024,74 @@ Game.UI = Game.UI || {};
   // タイミングそのものが確実にずれるため、経路の先頭が同じ1点であっても、そこを
   // 同時に通過することがなくなる。
   var lastEntranceWalkStartMs = -Infinity;
+
+  // バグ修正19（「二重に表示」のロジック側の原因・入口編）: バグ修正10・16で入口の周りに
+  // 正六角形状に客を立たせて順番を待たせていたが、毎フレームの座標記録による自動検出で、
+  // (1) 六角形の頂点の一部がちょうど入口の通路（入口の行・列）の上にあり、歩き出した客が
+  //     そこで待っている客の上を素通りして重なる、
+  // (2) 入口中心より奥側に立たされた客は、歩き出すとまず入口中心へ「逆戻り」するため、
+  //     先に歩き出した客と正面からすれ違って重なる、
+  // という2つが、1週間で30組前後の重なりの大半を占めていることが分かった。
+  // 対処：まだ店に入っていない客は、入口の外（画面には出さない）で1列に並ばせ、
+  // 「前の客が歩き出してからENTER_STAGGER_MS以上経過」かつ「入口のすぐ内側に他の客が
+  // いない（出口へ向かってくる客も近くにいない）」ときにだけ、1人ずつ入口中心に姿を
+  // 現して歩き出させる。これで入口付近で客同士が重なる状況そのものが無くなる。
+  // （客のentity自体は入店のbeat時点で作るので、配膳・離脱のbeatの対象プールには
+  // 今まで通り即座に含まれる＝バグ修正17の前提は崩さない。）
+  var doorQueue = []; // {ent, beginWalk}
+
+  function entrancePixel() {
+    return cellCenter(entrance.x, entrance.y);
+  }
+
+  function enqueueAtDoor(ent, beginWalk) {
+    var ep = entrancePixel();
+    ent.x = ep.x;
+    ent.y = ep.y;
+    ent.hiddenAtDoor = true;
+    ent.g.setAttribute("visibility", "hidden");
+    ent.g.setAttribute("transform", "translate(" + ent.x + "," + (ent.y + ENTITY_VISUAL_Y_OFFSET) + ")");
+    doorQueue.push({ ent: ent, beginWalk: beginWalk });
+  }
+
+  function removeFromDoorQueue(ent) {
+    doorQueue = doorQueue.filter(function (q) {
+      return q.ent !== ent;
+    });
+    ent.hiddenAtDoor = false;
+  }
+
+  function doorIsClear() {
+    var ep = entrancePixel();
+    for (var id in entities) {
+      var o = entities[id];
+      if (o.kind !== "customer" || o.hiddenAtDoor) continue;
+      var d = Math.hypot(o.x - ep.x, o.y - ep.y);
+      if (d < FOLLOW_MIN_SEP + 8) return false;
+      // 出口（＝入口）へ向かって歩いてくる客がすぐ近くにいる間は入れない（入口ですれ違って重なるのを防ぐ）
+      if (o.exitingToDoor && o.path && o.path.length > 0 && d < CELL * 2.2) return false;
+    }
+    return true;
+  }
+
+  function processDoorQueue() {
+    while (doorQueue.length > 0) {
+      var head = doorQueue[0];
+      if (!entities[head.ent.id]) {
+        doorQueue.shift(); // 入る前に帰ってしまった客（sendToExit参照）
+        continue;
+      }
+      if (simClockMs < lastEntranceWalkStartMs + ENTER_STAGGER_MS) return;
+      if (!doorIsClear()) return;
+      doorQueue.shift();
+      lastEntranceWalkStartMs = simClockMs;
+      head.ent.hiddenAtDoor = false;
+      head.ent.g.removeAttribute("visibility");
+      head.beginWalk();
+      return; // 1フレームに1人だけ入れる
+    }
+  }
+
   function scheduleEntranceWalk(ent, pendingActionName, beginWalk) {
     var earliest = Math.max(simClockMs, lastEntranceWalkStartMs + ENTER_STAGGER_MS);
     var delay = earliest - simClockMs;
@@ -1012,6 +1120,16 @@ Game.UI = Game.UI || {};
     // 始まっている（またはもう届いている）のに吹き出しだけ⏳に逆戻りして見えてしまう。
     // まだ誰も進めていない（＝spawn直後のまま）場合にだけ初期状態にする。
     if (c.phase === "walking_to_seat") c.phase = "awaiting_food";
+    // 着席後は「ゆっくり動かす箇所」を抜けるので、以後の動き（退店等）は通常速度に戻す。
+    c.speed = WALK_SPEED;
+    // バグ修正20の安全弁：ウェイターが待ちきれずに料理を置いていった場合、着いた瞬間に食べ始める
+    if (c.deliverOnArrive) {
+      c.deliverOnArrive = false;
+      c.phase = "eating";
+      c.timer = LOOK_TIME;
+      c.pendingAction = "start_eating";
+      showDish(c);
+    }
     redrawEntity(c);
   }
 
@@ -1020,21 +1138,18 @@ Game.UI = Game.UI || {};
   function spawnCustomerToSeatBeat(seat, tableCenterCell, productId) {
     var look = Game.Data.CharacterAssets.randomLook("cust_" + entitySeq + "_" + Date.now());
     var c = spawnEntity("customer", look, entrance, null);
-    var jitter = entranceJitter();
-    c.x += jitter.dx;
-    c.y += jitter.dy;
-    c.g.setAttribute("transform", "translate(" + c.x + "," + (c.y + ENTITY_VISUAL_Y_OFFSET) + ")");
     c.seatRef = seat;
     c.awaitingFood = true;
     c.pendingProductId = productId || pickAnyProduct();
     c.phase = "walking_to_seat";
+    c.speed = ENTRANCE_WALK_SPEED; // 入店直後はゆっくり歩かせる
     var path = pathBetween(entrance, seat);
     var beginWalk = function () {
       setPath(c, path, function () {
         settleAtTable(c, tableCenterCell);
       });
     };
-    scheduleEntranceWalk(c, "begin_walk_to_seat", beginWalk);
+    enqueueAtDoor(c, beginWalk); // バグ修正19：入口の外で1列に並び、入口が空いたら1人ずつ入る
   }
 
   // ================= 満席時の待機列（入口の外で待つ客） =================
@@ -1145,6 +1260,7 @@ Game.UI = Game.UI || {};
     c.seatRef = seat;
     c.awaitingFood = true;
     c.phase = "walking_to_seat";
+    c.speed = ENTRANCE_WALK_SPEED; // 外待ち列からの案内もゆっくり歩かせる
     var startCell = nearestCell(c.x, c.y);
     var path = pathBetween(startCell, seat);
     setPath(c, path, function () {
@@ -1155,10 +1271,6 @@ Game.UI = Game.UI || {};
   function spawnDisappointed() {
     var look = Game.Data.CharacterAssets.randomLook("gone_" + entitySeq + "_" + Date.now());
     var c = spawnEntity("customer", look, entrance, null);
-    var jitter = entranceJitter();
-    c.x += jitter.dx;
-    c.y += jitter.dy;
-    c.g.setAttribute("transform", "translate(" + c.x + "," + (c.y + ENTITY_VISUAL_Y_OFFSET) + ")");
     c.expression = "angry";
     c.phase = "walking_to_seat"; // 👀のまま少し歩く演出を流用
     var path = pathBetween(entrance, loiterPoint);
@@ -1169,7 +1281,7 @@ Game.UI = Game.UI || {};
         c.pendingAction = "leave_from_loiter";
       });
     };
-    scheduleEntranceWalk(c, "begin_walk_to_loiter", beginWalk);
+    enqueueAtDoor(c, beginWalk); // バグ修正19：入口が空いてから1人ずつ入る
   }
 
   // ================= 厨房 → カウンター → ウェイター の2段階受け渡し =================
@@ -1238,23 +1350,72 @@ Game.UI = Game.UI || {};
       var targetCell = job.customer.seatRef || nearestCell(job.customer.x, job.customer.y);
       var toTable = pathBetween(counterCell, targetCell);
       setPath(ent, toTable, function () {
-        ent.holdingIcon = null;
-        redrawEntity(ent);
-        if (entities[job.customer.id]) {
-          job.customer.phase = "eating";
-          job.customer.direction = "down";
-          job.customer.timer = LOOK_TIME;
-          job.customer.pendingAction = "start_eating";
-          showDish(job.customer);
-        }
-        var backCell = nearestCell(ent.x, ent.y);
-        var homePath = pathBetween(backCell, homeCell);
-        setPath(ent, homePath, function () {
-          snapToHome(waiter);
-          waiter.busy = false;
+        // バグ修正20（「消える」「前を向いていない」の原因の一つ）: 料理が先にできて
+        // ウェイターが席に着いた時点で、客がまだ席に着いていない（入口で順番待ち中・
+        // 歩いている途中）ことがある。従来はその場で客のphaseを"eating"にし、
+        // direction="down"に固定し、さらに客のtimer/pendingActionを"start_eating"で
+        // 上書きしていた。そのため、入口で歩き出しを待っていた客は歩き出しの予定
+        // （begin_walk_to_seat）を消されてその場で食べ始め、歩いている途中の客は
+        // 歩きながら食事→途中からレジへ向かう、といった不自然な動き（料理だけが席に
+        // 置かれず客と一緒に移動する／客が急に向きを変えて別方向へ行く）になっていた。
+        // 対処：客が本当に席（または待機列の立ち位置）に着いて止まるまで、ウェイターは
+        // 料理を持ったままその場で待ち、着いてから手渡す。
+        waitForCustomerThenDeliver(ent, job, function () {
+          var backCell = nearestCell(ent.x, ent.y);
+          var homePath = pathBetween(backCell, homeCell);
+          setPath(ent, homePath, function () {
+            snapToHome(waiter);
+            waiter.busy = false;
+          });
         });
       });
     });
+  }
+
+  function customerIsSettled(c) {
+    if (c.hiddenAtDoor) return false;
+    if (c.path && c.path.length > 0) return false;
+    if (c._beginWalk) return false; // 歩き出しの予約待ち
+    return true;
+  }
+
+  var WAITER_WAIT_POLL_MS = 100;
+  var WAITER_WAIT_MAX_MS = 8000; // 万一客が来ない場合の安全弁（ゲーム内時間）
+  function waitForCustomerThenDeliver(waiterEnt, job, onDone) {
+    var waited = 0;
+    function attempt() {
+      var c = job.customer;
+      if (!entities[c.id]) {
+        // 客が既に帰ってしまった（離脱処理など）：料理を持ち帰る
+        waiterEnt.holdingIcon = null;
+        redrawEntity(waiterEnt);
+        onDone();
+        return;
+      }
+      if (!customerIsSettled(c) && waited < WAITER_WAIT_MAX_MS) {
+        waited += WAITER_WAIT_POLL_MS;
+        waiterEnt.timer = WAITER_WAIT_POLL_MS;
+        waiterEnt.pendingAction = "waiter_retry";
+        waiterEnt._retry = attempt;
+        // 客の方を向いて待つ
+        waiterEnt.direction = directionFromDelta(c.x - waiterEnt.x, c.y - waiterEnt.y);
+        return;
+      }
+      waiterEnt.holdingIcon = null;
+      redrawEntity(waiterEnt);
+      if (customerIsSettled(c)) {
+        c.phase = "eating";
+        c.timer = LOOK_TIME;
+        c.pendingAction = "start_eating";
+        showDish(c);
+      } else {
+        // 安全弁：まだ着いていない客には、着いた瞬間に食べ始めてもらう
+        c.deliverOnArrive = true;
+        c.phase = "eating";
+      }
+      onDone();
+    }
+    attempt();
   }
 
   function processWaiters() {
@@ -1287,6 +1448,12 @@ Game.UI = Game.UI || {};
     } else if (action === "leave_from_loiter") {
       ent.phase = "disappointed_leaving";
       sendToExit(ent, true);
+    } else if (action === "waiter_retry") {
+      if (ent._retry) {
+        var retry = ent._retry;
+        ent._retry = null;
+        retry();
+      }
     } else if (action === "begin_walk_to_seat" || action === "begin_walk_to_loiter" || action === "begin_walk_to_exit") {
       // バグ修正4・15：入店/離脱/退店の見た目をずらすための待機が明けたタイミングで、
       // 実際の経路設定（setPath）を今ここで行う。
@@ -1380,6 +1547,7 @@ Game.UI = Game.UI || {};
 
     simClockMs += dt * 1000;
 
+    processDoorQueue(); // バグ修正19：入口が空いていれば順番待ちの客を1人入れる
     processKitchen();
     processWaiters();
     updateMoneyPopups(dt);
@@ -1391,9 +1559,66 @@ Game.UI = Game.UI || {};
     rafHandle = requestAnimationFrame(tick);
   }
 
+  // バグ修正19参照：進行方向の前方すぐ近くを、自分より先に登場した客が歩いているか。
+  function isBlockedByLeader(ent) {
+    if (ent.kind !== "customer" || !ent.path || ent.path.length === 0) return false;
+    var t = ent.path[0];
+    var hx = t.x - ent.x, hy = t.y - ent.y;
+    var hl = Math.hypot(hx, hy);
+    if (hl < 0.001) return false;
+    hx /= hl;
+    hy /= hl;
+    var dest = ent.path[ent.path.length - 1];
+    for (var id in entities) {
+      var o = entities[id];
+      if (o === ent || o.kind !== "customer" || o.hiddenAtDoor) continue;
+      var ox = o.x - ent.x, oy = o.y - ent.y;
+      var od = Math.hypot(ox, oy);
+      if (od >= FOLLOW_MIN_SEP) continue;
+      if (!o.path || o.path.length === 0) {
+        // 止まっている相手：自分の行き先（レジ・入口など）にちょうど立っている場合だけ、
+        // その手前で待つ（相手は会計等が終われば必ず動くので、待てば空く）。
+        // それ以外の止まっている客（席にいる客など）は待っても動かないので対象外。
+        if (Math.hypot(o.x - dest.x, o.y - dest.y) < FOLLOW_MIN_SEP && (ox * hx + oy * hy) / Math.max(od, 0.001) > 0.3) return true;
+        continue;
+      }
+      if (od < 0.001) {
+        if (o.seq < ent.seq) return true; // 完全に同じ座標：古い方を先に行かせる
+        continue;
+      }
+      if ((ox * hx + oy * hy) / od <= 0.3) continue; // 相手は前方（進行方向±約70°以内）にいない
+      // 相手も自分を前方に見ている＝正面衝突の形。この場合だけ古い方（seqが小さい方）を
+      // 優先し、新しい方が待つ（両方が待って固まることを防ぐ）。それ以外（前を歩く人の
+      // 後ろに付いている形）は、年齢に関係なく後ろ側が待つ。
+      var ot = o.path[0];
+      var ohx = ot.x - o.x, ohy = ot.y - o.y;
+      var ohl = Math.hypot(ohx, ohy);
+      var headOn = ohl > 0.001 && ((-ox * ohx + -oy * ohy) / (od * ohl)) > 0.3;
+      if (headOn && ent.seq < o.seq) continue;
+      return true;
+    }
+    return false;
+  }
+
   function updateEntity(ent, dt) {
+    // バグ修正21（「消える」の見た目の原因の一つ・吹き出しの取り残し）: 同じフレーム内で
+    // 他の客の処理（席が空いた→待機列から案内、など）によって既に画面から消された
+    // entityに対しては何もしない。
+    if (!entities[ent.id]) return;
     var moving = false;
-    if (ent.path && ent.path.length > 0) {
+    ent.blockedByLeader = false;
+    if (ent.path && ent.path.length > 0 && isBlockedByLeader(ent)) {
+      ent.followWaitMs += dt * 1000;
+      if (ent.followWaitMs < FOLLOW_MAX_WAIT_MS) {
+        ent.blockedByLeader = true;
+        // 待っている間も「行き先の方向」を向かせておく（前を向いたまま立ち止まる）
+        var tgt = ent.path[0];
+        if (Math.hypot(tgt.x - ent.x, tgt.y - ent.y) > 0) ent.direction = directionFromDelta(tgt.x - ent.x, tgt.y - ent.y);
+      }
+    } else {
+      ent.followWaitMs = 0;
+    }
+    if (ent.path && ent.path.length > 0 && !ent.blockedByLeader) {
       moving = true;
       // バグ修正9（「進むときに前を向いたまま進む」対応）: 従来は1フレームにつき
       // 目的地(path[0])までの距離distと、このフレームで進める距離stepを比べ、
@@ -1440,6 +1665,7 @@ Game.UI = Game.UI || {};
       }
     }
 
+    if (!entities[ent.id]) return; // バグ修正21：到着時の処理で消えた場合は以降の処理をしない
     if (moving) {
       ent.walkPhase += dt * WALK_PHASE_RATE;
     } else {
@@ -1454,12 +1680,17 @@ Game.UI = Game.UI || {};
       }
     }
 
+    // バグ修正21: 出口に着いた（onArrive→despawnEntity）・入る前に帰った等で、この
+    // フレームの処理中に客が画面から消された場合、ここで描画や吹き出しの再設定を続けると、
+    // despawnEntityで消したはずの吹き出し（👋など）がその場に作り直され、持ち主のいない
+    // アイコンだけが入口に残り続けていた（＝人だけが突然消えたように見える）。
+    if (!entities[ent.id]) return;
     redrawEntity(ent);
     ent.g.setAttribute("transform", "translate(" + ent.x + "," + (ent.y + ENTITY_VISUAL_Y_OFFSET) + ")");
     if (ent.dishEl) ent.dishEl.setAttribute("transform", "translate(" + ent.x + "," + (ent.y + ENTITY_VISUAL_Y_OFFSET - CELL * 0.32) + ")");
 
     if (ent.kind === "customer") {
-      setBubble(ent, BUBBLE_BY_PHASE[ent.phase] || null);
+      setBubble(ent, ent.hiddenAtDoor ? null : BUBBLE_BY_PHASE[ent.phase] || null);
     }
     if (ent.bubbleEl) ent.bubbleEl.setAttribute("transform", "translate(" + ent.x + "," + (ent.y + ENTITY_VISUAL_Y_OFFSET) + ")");
   }
@@ -1523,6 +1754,7 @@ Game.UI = Game.UI || {};
     // 無駄な案内処理が走らないようにする）。
     outsideQueue = [];
     outsideOverflowCount = 0;
+    doorQueue = [];
     updateQueueBadge();
     Object.keys(entities).forEach(function (id) {
       if (!entities[id].isFixtureStaff) despawnEntity(entities[id]);
@@ -1563,6 +1795,7 @@ Game.UI = Game.UI || {};
     pause();
     outsideQueue = [];
     outsideOverflowCount = 0;
+    doorQueue = [];
     updateQueueBadge();
     Object.keys(entities).forEach(function (id) {
       if (!entities[id].isFixtureStaff) despawnEntity(entities[id]);
@@ -1583,6 +1816,7 @@ Game.UI = Game.UI || {};
     stopLoop();
     outsideQueue = [];
     outsideOverflowCount = 0;
+    doorQueue = [];
     updateQueueBadge();
     Object.keys(entities).forEach(function (id) {
       despawnEntity(entities[id]);
@@ -1621,5 +1855,8 @@ Game.UI = Game.UI || {};
     clear: clear,
     renderIdle: renderIdle,
     hasActiveCustomers: hasActiveCustomers,
+    // 検証用（自動テストから現在のエンティティ・出口座標を参照するためだけに使う）
+    __debugEntities: function () { return entities; },
+    __debugEntrance: function () { return entrance ? cellCenter(entrance.x, entrance.y) : null; },
   };
 })();

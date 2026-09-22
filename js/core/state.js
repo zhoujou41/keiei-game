@@ -37,7 +37,8 @@ Game.Core = Game.Core || {};
       return Object.assign({}, p, {
         currentPrice: p.basePrice,
         pricePct: 100, // 基準価格に対する% (0〜10000で直接指定可能。office.js参照)
-        purchaseRate: 100, // 基準仕入れ量に対する% (同上)
+        purchaseRate: 100, // 基準仕入れ量に対する% (2026-09-22〜: purchaseLevelから自動計算される)
+        purchaseLevel: 3, // 仕入れ量レベル（1〜3、3=Max。2026-09-22追加）
         stock: 0,
       });
     });
@@ -136,6 +137,18 @@ Game.Core = Game.Core || {};
         if (p.purchaseRate == null) {
           p.purchaseRate = 100;
         }
+        // 2026-09-22（仕入れレベル制対応）: 旧セーブにはpurchaseLevelが無いため、
+        // 現在のpurchaseRate（%）から最も近いレベル（1〜3、3=Max=100%）を逆算して補完する
+        // （表示上の連続性を保つ。以後はレベル選択でpurchaseRateが上書きされる）。
+        if (p.purchaseLevel == null) {
+          var levelPct = { 1: 34, 2: 67, 3: 100 };
+          var bestLevel = 3, bestDiff = Infinity;
+          Object.keys(levelPct).forEach(function (lv) {
+            var diff = Math.abs(p.purchaseRate - levelPct[lv]);
+            if (diff < bestDiff) { bestDiff = diff; bestLevel = parseInt(lv, 10); }
+          });
+          p.purchaseLevel = bestLevel;
+        }
       });
     }
     // 2026-09-22（シフト改修）: 役割register/otherを廃止しservice/choresへ統合、
@@ -180,7 +193,7 @@ Game.Core = Game.Core || {};
       var g = state.currentGoal;
       if (!g.description) {
         g.description =
-          "第" + g.milestoneIndex + "期の試練です。" + g.untilWeek +
+          "第" + g.milestoneIndex + "期の目標です。" + g.untilWeek +
           "週目までの間に、以下の数値を達成することが求められています。未達成でも即ゲームオーバーにはなりませんが、" +
           "評判低下や追加コストなど経営が苦しくなる影響があります。";
       }

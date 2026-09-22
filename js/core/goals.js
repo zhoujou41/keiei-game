@@ -23,11 +23,11 @@ Game.Core = Game.Core || {};
       goal.minCustomers = Math.round(180 * difficulty);
     }
 
-    // ---- 「今週の試練」表示用テキスト（2026-09-22追加） ----
+    // ---- 「今週の目標」表示用テキスト（2026-09-22追加、2026-09-22「試練」→「目標」に改称） ----
     // description: 目標の位置づけを説明する導入文（先に表示）。
     // summary: 目標の概要を太字で見せるための短い1行まとめ。
     goal.description =
-      "第" + milestoneIndex + "期の試練です。" + state.week + "週目から" + goal.untilWeek +
+      "第" + milestoneIndex + "期の目標です。" + state.week + "週目から" + goal.untilWeek +
       "週目までの間に、以下の数値を達成することが求められています。未達成でも即ゲームオーバーにはなりませんが、" +
       "評判低下や追加コストなど経営が苦しくなる影響があります。";
     var summaryParts = [
@@ -79,9 +79,63 @@ Game.Core = Game.Core || {};
     return messages;
   }
 
+  // 2026-09-22（今週の目標・バッドステータス表示対応）: マイルストーン期間の途中経過を見て、
+  // 「このままのペースだと期限までに目標未達になりそうか」を判定する。
+  // ・累積利益／累積客数：期間内で既に経過した週数の割合（elapsedRatio）に対して、
+  //   達成率（現在の累積／目標値）が明らかに下回っていれば「ペースが遅れている」とみなす。
+  //   （少しの遅れで毎週表示がちらつかないよう、5%のバッファを設けている）
+  // ・評判：累積ではなく「常にその時点の値が目標以上であるべき」指標のため、単純に
+  //   現在値が目標を下回っているかどうかで判定する（ペース計算は行わない）。
+  // 期間の最初の週（まだ1週も終わっていない＝elapsedWeeks=0）は判定材料が無いため
+  // 「遅れている」とは表示しない。
+  function evaluatePace(state) {
+    var goal = state.currentGoal;
+    var acc = state.milestoneAccum;
+    var startWeek = goal.untilWeek - state.milestoneLength + 1;
+    var elapsedWeeks = Random_clamp0(state.week - startWeek, 0, state.milestoneLength);
+    var elapsedRatio = elapsedWeeks / state.milestoneLength;
+
+    var messages = [];
+    var profitBehind = false;
+    var customersBehind = false;
+    var reputationBehind = state.reputation < goal.minReputation;
+
+    if (elapsedWeeks > 0) {
+      var profitRatio = goal.minProfit > 0 ? acc.profit / goal.minProfit : 1;
+      if (profitRatio < elapsedRatio - 0.05) {
+        profitBehind = true;
+        messages.push("累積利益が目標ペースを下回っています。");
+      }
+      if (goal.minCustomers != null) {
+        var customerRatio = goal.minCustomers > 0 ? acc.customers / goal.minCustomers : 1;
+        if (customerRatio < elapsedRatio - 0.05) {
+          customersBehind = true;
+          messages.push("累積客数が目標ペースを下回っています。");
+        }
+      }
+    }
+    if (reputationBehind) {
+      messages.push("評判が目標水準に届いていません。");
+    }
+
+    return {
+      profitBehind: profitBehind,
+      reputationBehind: reputationBehind,
+      customersBehind: customersBehind,
+      anyBehind: profitBehind || reputationBehind || customersBehind,
+      messages: messages,
+    };
+  }
+
+  // Math.max/minだけで書くと0クランプの意図が読みにくいため、小さな専用ヘルパーにする。
+  function Random_clamp0(v, lo, hi) {
+    return Math.max(lo, Math.min(hi, v));
+  }
+
   Game.Core.Goals = {
     generateGoal: generateGoal,
     evaluateGoal: evaluateGoal,
     applyFailurePenalty: applyFailurePenalty,
+    evaluatePace: evaluatePace,
   };
 })();

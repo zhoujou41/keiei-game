@@ -55,14 +55,24 @@ Game.Data = Game.Data || {};
 
   // ================= キャラクター（役割ベース、v3） =================
   var DIRECTIONS = ["down", "up", "left", "right"];
-  // 素材に「上向き」が存在しないため（全キャラ確認済み）、暫定的に別方向のコマを流用する。
-  // ユーザー指示により"right"を代用先とする（本物の後ろ向き素材が手に入り次第ここを外す）。
-  var UP_DIRECTION_FALLBACK = "right";
-  // 各方向・各アニメ種別（walk/idle）のコマ数。抽出スクリプト（scratchpad側）の出力と一致させること。
+  // 2026-09-22 バグ修正18（「二重に表示」「消える」「進む方向を向いていない」の真因）:
+  // 旧characters_v3のコマ画像は抽出そのものが壊れていた。LimeZu Legacyシートは
+  // 1コマ＝幅16px×高さ32pxで、各行24コマが「右6・上6・左6・下6」の順に並ぶ
+  // （行1＝待機アニメ、行2＝歩行、行3〜4＝着席ポーズ）。ところが旧抽出は幅32pxで
+  // 切り出していたため、
+  //   ・1枚のコマに隣り合う2コマ分＝キャラが2人並んで写る（→「二重に表示」）
+  //   ・シート範囲外を切った空白コマが混ざる（→歩行中に一瞬「消える」）
+  //   ・down待機が「右→上→左→下」の静止4方向を順に回すコマになっていた、
+  //     right系は着席ポーズ行から切られていた（→「進む方向を向いていない」）
+  // という状態だった。また「上向き素材は存在しない」として右向きで代用していたが、
+  // 実際には各行の7〜12コマ目に後ろ姿がある。元シート（moderninteriors-win.zip内
+  // 2_Characters/Old/Single_Characters_Legacy/16x16/<名前>_16x16.png）から正しく
+  // 16x32で切り直し、32x32キャンバスの中央(x=8)に置いて全4方向×(歩行6+待機6)コマを再生成した。
   var FRAME_COUNTS = {
-    down: { walk: 6, idle: 4 },
-    left: { walk: 6, idle: 2 },
-    right: { walk: 6, idle: 2 },
+    down: { walk: 6, idle: 6 },
+    up: { walk: 6, idle: 6 },
+    left: { walk: 6, idle: 6 },
+    right: { walk: 6, idle: 6 },
   };
 
   // 客として使うキャラのバリエーション一覧（LimeZu Single_Characters_Legacy由来）。
@@ -84,10 +94,9 @@ Game.Data = Game.Data || {};
   var DEFAULT_STAFF_LOOK = STAFF_LOOKS.cook;
 
   // direction("down"/"up"/"left"/"right") + animGroup("walk"/"idle") から
-  // そのコマ数ぶんの画像パス配列を返す（実際に何枚あるかはFRAME_COUNTSに従う。
-  // "up"は素材が無いためFRAME_COUNTS上も"right"のコマ数を使う）。
+  // そのコマ数ぶんの画像パス配列を返す（実際に何枚あるかはFRAME_COUNTSに従う）。
   function characterFramePaths(lookKey, direction, animGroup) {
-    var dir = direction === "up" ? UP_DIRECTION_FALLBACK : direction;
+    var dir = FRAME_COUNTS[direction] ? direction : "down";
     var n = FRAME_COUNTS[dir][animGroup];
     var paths = [];
     for (var i = 0; i < n; i++) {

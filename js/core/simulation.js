@@ -378,6 +378,7 @@ Game.Core = Game.Core || {};
       satisfactionSum: 0,
       satisfactionCount: 0,
       stockoutProducts: {},
+      byProduct: {}, // 2026-09-22（先週の状況パネル対応）: 商品ごとの販売数・売上・満足度を集計
     };
 
     var soldOutLogged = {};
@@ -501,6 +502,14 @@ Game.Core = Game.Core || {};
           var satisfaction = order.wait <= 1 ? 90 : order.wait <= 3 ? 65 : 40;
           stats.satisfactionSum += satisfaction;
           stats.satisfactionCount++;
+          if (!stats.byProduct[order.productId]) {
+            stats.byProduct[order.productId] = { sold: 0, revenue: 0, satisfactionSum: 0, satisfactionCount: 0 };
+          }
+          var pbEntry = stats.byProduct[order.productId];
+          pbEntry.sold++;
+          pbEntry.revenue += product.currentPrice;
+          pbEntry.satisfactionSum += satisfaction;
+          pbEntry.satisfactionCount++;
           servedProductsThisTick.push(order.productId);
         } else {
           order.wait++;
@@ -617,6 +626,34 @@ Game.Core = Game.Core || {};
     state.milestoneAccum.profit += profit;
     state.milestoneAccum.customers += stats.served;
 
+    // 2026-09-22（先週の状況パネル対応）: 商品ごとの「先週の価格・仕入れ数・売れた数・
+    // 余った数・利益・値段に対する客の評価」を、OFFICE画面の「先週の状況」パネルで
+    // 使えるようにまとめておく。値段への評価（valueLabel）は、既存の価格弾力性モデル
+    // （Economy.priceDemandFactor＝基準価格からの乖離に応じて需要が増減する仕組み）を
+    // そのまま再利用し、「基準価格よりお得な価格設定だったか／割高だったか」として表現する
+    // （＝味そのものを表す独立した数値データは無いため、価格の妥当性という形で代用する）。
+    var itemStats = state.products.map(function (p) {
+      var pb = stats.byProduct[p.id] || { sold: 0, revenue: 0, satisfactionSum: 0, satisfactionCount: 0 };
+      var purchasedQty = purchase.quantities[p.id] || 0;
+      var leftoverQty = Math.max(0, stockLeft[p.id] || 0);
+      var itemProfit = pb.revenue - purchasedQty * p.cost * purchase.costMult;
+      var avgSatisfaction = pb.satisfactionCount > 0 ? Math.round(pb.satisfactionSum / pb.satisfactionCount) : null;
+      var valueFactor = Economy.priceDemandFactor(p, conditions);
+      var valueLabel = valueFactor >= 1.15 ? "お得感あり" : valueFactor <= 0.85 ? "割高感あり" : "妥当な価格感";
+      return {
+        productId: p.id,
+        name: p.name,
+        priceAtSale: p.currentPrice,
+        cost: p.cost,
+        purchasedQty: purchasedQty,
+        soldQty: pb.sold,
+        leftoverQty: leftoverQty,
+        profit: Math.round(itemProfit),
+        avgSatisfaction: avgSatisfaction,
+        valueLabel: valueLabel,
+      };
+    });
+
     var result = {
       week: state.week,
       playedWeekForesight: playedWeekForesight,
@@ -630,6 +667,7 @@ Game.Core = Game.Core || {};
       repDelta: Math.round(repDelta * 10) / 10,
       money: state.money,
       stockoutProducts: Object.keys(stats.stockoutProducts),
+      itemStats: itemStats,
       goalCheck: null,
     };
 

@@ -41,6 +41,17 @@ Game.UI = Game.UI || {};
   var PRICE_STEP = 5; // ±ボタン1クリックあたりの変化幅（%）
   var PURCHASE_STEP = 10;
 
+  // 2026-09-22（仕入れレベル制対応）: 仕入れ量の指定を、従来の0%〜10,000%の直接入力から
+  // 「レベル1〜3」の3段階選択に簡略化した（レベル3＝Max＝基準仕入れ量100%）。
+  // purchaseRate（%）自体は内部計算（Economy.computePurchase等）にそのまま使うため、
+  // レベルを選ぶとそのレベルに対応する%へ変換してpurchaseRateへ反映する方式にしている。
+  var PURCHASE_LEVEL_PCT = { 1: 34, 2: 67, 3: 100 };
+  var PURCHASE_LEVEL_LABEL = { 1: "少なめ", 2: "標準", 3: "Max" };
+
+  function purchaseLevelOf(p) {
+    return p.purchaseLevel != null ? p.purchaseLevel : 3;
+  }
+
   function pricePctOf(p) {
     return p.pricePct != null ? p.pricePct : Math.round((p.currentPrice / p.basePrice) * 100);
   }
@@ -82,14 +93,17 @@ Game.UI = Game.UI || {};
             '<div class="muted small" style="margin-top:2px;">→ 販売価格 <b>' + p.currentPrice + "円</b>（粗利 " +
               currentGrossMargin + "円）</div>" +
 
-            '<div class="muted small" style="margin-top:8px;">仕入れ量（基準比 %）</div>' +
-            '<div class="pct-adjust">' +
-              '<button data-action="adjust-purchase-pct" data-product="' + p.id + '" data-dir="-1">−</button>' +
-              '<input type="number" class="pct-input" min="' + Game.Data.PURCHASE_PCT_MIN + '" max="' + Game.Data.PURCHASE_PCT_MAX +
-                '" step="1" value="' + purchasePct + '" data-action="set-purchase-pct" data-product="' + p.id + '">%' +
-              '<button data-action="adjust-purchase-pct" data-product="' + p.id + '" data-dir="1">＋</button>' +
+            '<div class="muted small" style="margin-top:8px;">仕入れ量レベル</div>' +
+            '<div class="purchase-level-buttons">' +
+              [1, 2, 3].map(function (lv) {
+                var active = purchaseLevelOf(p) === lv ? "active" : "";
+                return (
+                  '<button class="purchase-level-btn ' + active + '" data-action="set-purchase-level" data-product="' +
+                    p.id + '" data-level="' + lv + '">Lv' + lv + "<br><span class=\"small\">" + PURCHASE_LEVEL_LABEL[lv] + "</span></button>"
+                );
+              }).join("") +
             "</div>" +
-            '<div class="muted small" style="margin-top:2px;">→ ' + qty + " 食分（仕入れ費用 " + fmt(purchaseCost) + "円）</div>" +
+            '<div class="muted small" style="margin-top:2px;">→ ' + qty + " 食分（基準比 " + purchasePct + "% ／ 仕入れ費用 " + fmt(purchaseCost) + "円）</div>" +
           "</div>"
         );
       })
@@ -110,16 +124,14 @@ Game.UI = Game.UI || {};
     setPricePct(productId, pricePctOf(p) + dir * PRICE_STEP);
   }
 
-  function setPurchasePct(productId, value) {
+  function setPurchaseLevel(productId, level) {
     var p = state().products.find(function (x) { return x.id === productId; });
-    p.purchaseRate = clampPct(value);
+    if (!p) return;
+    level = Game.Core.Random.clamp(parseInt(level, 10) || 3, 1, 3);
+    p.purchaseLevel = level;
+    p.purchaseRate = PURCHASE_LEVEL_PCT[level];
     renderPurchaseSection();
     Game.App.save();
-  }
-
-  function adjustPurchasePct(productId, dir) {
-    var p = state().products.find(function (x) { return x.id === productId; });
-    setPurchasePct(productId, p.purchaseRate + dir * PURCHASE_STEP);
   }
 
   // ================= シフト =================
@@ -357,11 +369,24 @@ Game.UI = Game.UI || {};
     );
   }
 
+  // 2026-09-22（今週の目標・バッドステータス表示対応）: 「このままのペースだと目標未達に
+  // なりそうか」をGame.Core.Goals.evaluatePace()で判定し、該当する場合は赤系の警告バナーを
+  // 目標の説明文の上に表示する。まだ1週も消化していない期間の最初は判定できないため
+  // 何も表示しない（evaluatePace側でanyBehind=falseになる）。
   function renderGoalSection() {
     var s = state();
     var g = s.currentGoal;
     var acc = s.milestoneAccum;
+    var pace = Game.Core.Goals.evaluatePace(s);
+    var badStatusHtml = "";
+    if (pace.anyBehind) {
+      badStatusHtml =
+        '<div class="goal-bad-status">⚠️ <b>目標未達の見込み</b><ul style="margin:4px 0 0;padding-left:1.2em;">' +
+        pace.messages.map(function (m) { return "<li>" + esc(m) + "</li>"; }).join("") +
+        "</ul></div>";
+    }
     var html =
+      badStatusHtml +
       '<div class="muted small">' + esc(g.description || "") + "</div>" +
       '<div style="margin-top:8px;font-weight:bold;font-size:1.05em;">' + esc(g.summary || "") + "</div>" +
       '<div class="col" style="margin-top:10px;">' +
@@ -370,6 +395,50 @@ Game.UI = Game.UI || {};
         (g.minCustomers != null ? "<div>累積客数 " + progressBar(acc.customers, g.minCustomers) + "</div>" : "") +
       "</div>";
     el("office-goal").innerHTML = html;
+  }
+
+  // ================= 先週の状況（2026-09-22追加） =================
+  // 今週の未来視パネルの下に、直前の週（state.lastWeekResult）の実績をまとめて表示する。
+  // まだ一度も営業していない（lastWeekResultが無い）場合は「まだありません」を出す。
+  function renderLastWeekSection() {
+    var s = state();
+    var r = s.lastWeekResult;
+    var target = el("office-lastweek");
+    if (!target) return;
+    if (!r) {
+      target.innerHTML = '<div class="muted small" style="margin-top:10px;">先週の状況はまだありません（初回営業前）。</div>';
+      return;
+    }
+    var foresightHtml = "";
+    if (r.playedWeekForesight && r.playedWeekForesight.lines && r.playedWeekForesight.lines.length > 0) {
+      foresightHtml =
+        '<div class="small muted" style="margin-top:6px;">先週の未来視：</div><ul class="small">' +
+        r.playedWeekForesight.lines.map(function (l) { return "<li>" + esc(l) + "</li>"; }).join("") +
+        "</ul>";
+    }
+    var itemRows = (r.itemStats || [])
+      .map(function (it) {
+        var profitCls = it.profit >= 0 ? "good" : "bad";
+        return (
+          '<div class="lastweek-item-row">' +
+            '<div class="lastweek-item-name">' + esc(it.name) + "</div>" +
+            '<div class="small">価格 ' + fmt(it.priceAtSale) + "円 ／ 仕入 " + fmt(it.purchasedQty) +
+              "食 ／ 販売 " + fmt(it.soldQty) + "食 ／ 余り " + fmt(it.leftoverQty) + "食</div>" +
+            '<div class="small ' + profitCls + '">利益 ' + fmt(it.profit) + "円　" +
+              (it.avgSatisfaction != null ? "客の評価：" + esc(it.valueLabel) + "（満足度目安 " + it.avgSatisfaction + "）" : "客の評価：販売実績なし") +
+            "</div>" +
+          "</div>"
+        );
+      })
+      .join("");
+    target.innerHTML =
+      '<div class="lastweek-panel" style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.12);padding-top:8px;">' +
+        '<div style="font-weight:bold;">📊 先週（第' + r.week + "週）の状況</div>" +
+        "<div class=\"small\" style=\"margin-top:4px;\">利益 " + fmt(r.profit) + "円 ／ 客数 " + fmt(r.served) +
+          "人 ／ 評判 " + r.reputationBefore + " → " + r.reputationAfter + "</div>" +
+        foresightHtml +
+        '<div class="col" style="margin-top:8px;gap:4px;">' + itemRows + "</div>" +
+      "</div>";
   }
 
   // ================= 特殊行動：新規雇用 =================
@@ -441,8 +510,8 @@ Game.UI = Game.UI || {};
     var action = t.getAttribute("data-action");
     if (action === "adjust-price-pct") {
       adjustPricePct(t.getAttribute("data-product"), parseInt(t.getAttribute("data-dir"), 10));
-    } else if (action === "adjust-purchase-pct") {
-      adjustPurchasePct(t.getAttribute("data-product"), parseInt(t.getAttribute("data-dir"), 10));
+    } else if (action === "set-purchase-level") {
+      setPurchaseLevel(t.getAttribute("data-product"), t.getAttribute("data-level"));
     } else if (action === "skill-up") {
       spendSkillPoint(t.getAttribute("data-skill"));
     } else if (action === "set-focus") {
@@ -470,8 +539,6 @@ Game.UI = Game.UI || {};
       setStaffManagementFocus(t.getAttribute("data-staff"), t.value);
     } else if (action === "set-price-pct") {
       setPricePct(t.getAttribute("data-product"), t.value);
-    } else if (action === "set-purchase-pct") {
-      setPurchasePct(t.getAttribute("data-product"), t.value);
     }
   }
 
@@ -510,6 +577,7 @@ Game.UI = Game.UI || {};
     }
     renderGoalSection();
     renderForesightSection();
+    renderLastWeekSection();
     renderPurchaseSection();
     renderShiftSection();
     renderSkillSection();
