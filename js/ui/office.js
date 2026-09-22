@@ -38,19 +38,11 @@ Game.UI = Game.UI || {};
   // ================= 仕入れ =================
   // 2026-09-22改修: 販売価格・仕入れ量とも「基準価格/基準仕入れ量に対する%」として
   // 0%〜10,000%の範囲で直接入力 or ±ボタンで指定できるようにした。
+  // 2026-09-22（訂正）: 一時「仕入れ量レベル制（Lv1〜3）」に置き換えたが、ユーザーから
+  // 「レベルは仕入れ量の設定ではなく、その料理の熟練度」と訂正されたため、
+  // 仕入れ量は元の0%〜10,000%直接入力＋±ボタンの形に戻した。
   var PRICE_STEP = 5; // ±ボタン1クリックあたりの変化幅（%）
   var PURCHASE_STEP = 10;
-
-  // 2026-09-22（仕入れレベル制対応）: 仕入れ量の指定を、従来の0%〜10,000%の直接入力から
-  // 「レベル1〜3」の3段階選択に簡略化した（レベル3＝Max＝基準仕入れ量100%）。
-  // purchaseRate（%）自体は内部計算（Economy.computePurchase等）にそのまま使うため、
-  // レベルを選ぶとそのレベルに対応する%へ変換してpurchaseRateへ反映する方式にしている。
-  var PURCHASE_LEVEL_PCT = { 1: 34, 2: 67, 3: 100 };
-  var PURCHASE_LEVEL_LABEL = { 1: "少なめ", 2: "標準", 3: "Max" };
-
-  function purchaseLevelOf(p) {
-    return p.purchaseLevel != null ? p.purchaseLevel : 3;
-  }
 
   function pricePctOf(p) {
     return p.pricePct != null ? p.pricePct : Math.round((p.currentPrice / p.basePrice) * 100);
@@ -77,6 +69,16 @@ Game.UI = Game.UI || {};
         var grossMarginPerItem = p.basePrice - p.cost; // 基準価格での粗利（原価欄に添える参考値）
         var currentGrossMargin = p.currentPrice - p.cost; // 現在の販売価格での粗利
         var marginPct = p.basePrice > 0 ? Math.round((grossMarginPerItem / p.basePrice) * 100) : 0;
+        var mastery = Game.Core.Economy.masteryProgress(p.cumulativeSold);
+        var ceiling = Game.Core.Economy.priceCeiling(p, mastery.level);
+        var masteryHtml =
+          '<div class="muted small" style="margin-top:8px;">熟練度 <b>Lv.' + mastery.level + "</b>" +
+            (mastery.isMax
+              ? "（Max）"
+              : "（累計販売 " + mastery.cumulativeSold + " / " + mastery.nextThreshold + " でLv." + (mastery.level + 1) + "へ）") +
+          "</div>" +
+          '<div class="muted small" style="margin-top:2px;">この熟練度での価格天井：約 ' + fmt(ceiling) +
+            "円（これを超える値付けだと客が購入をやめてしまいます）</div>";
         return (
           '<div class="product-card">' +
             '<div class="title">' + p.icon + " " + esc(p.name) + "</div>" +
@@ -92,18 +94,16 @@ Game.UI = Game.UI || {};
             "</div>" +
             '<div class="muted small" style="margin-top:2px;">→ 販売価格 <b>' + p.currentPrice + "円</b>（粗利 " +
               currentGrossMargin + "円）</div>" +
+            masteryHtml +
 
-            '<div class="muted small" style="margin-top:8px;">仕入れ量レベル</div>' +
-            '<div class="purchase-level-buttons">' +
-              [1, 2, 3].map(function (lv) {
-                var active = purchaseLevelOf(p) === lv ? "active" : "";
-                return (
-                  '<button class="purchase-level-btn ' + active + '" data-action="set-purchase-level" data-product="' +
-                    p.id + '" data-level="' + lv + '">Lv' + lv + "<br><span class=\"small\">" + PURCHASE_LEVEL_LABEL[lv] + "</span></button>"
-                );
-              }).join("") +
+            '<div class="muted small" style="margin-top:8px;">仕入れ量（基準比 %）</div>' +
+            '<div class="pct-adjust">' +
+              '<button data-action="adjust-purchase-pct" data-product="' + p.id + '" data-dir="-1">−</button>' +
+              '<input type="number" class="pct-input" min="' + Game.Data.PURCHASE_PCT_MIN + '" max="' + Game.Data.PURCHASE_PCT_MAX +
+                '" step="1" value="' + purchasePct + '" data-action="set-purchase-pct" data-product="' + p.id + '">%' +
+              '<button data-action="adjust-purchase-pct" data-product="' + p.id + '" data-dir="1">＋</button>' +
             "</div>" +
-            '<div class="muted small" style="margin-top:2px;">→ ' + qty + " 食分（基準比 " + purchasePct + "% ／ 仕入れ費用 " + fmt(purchaseCost) + "円）</div>" +
+            '<div class="muted small" style="margin-top:2px;">→ ' + qty + " 食分（仕入れ費用 " + fmt(purchaseCost) + "円）</div>" +
           "</div>"
         );
       })
@@ -124,14 +124,16 @@ Game.UI = Game.UI || {};
     setPricePct(productId, pricePctOf(p) + dir * PRICE_STEP);
   }
 
-  function setPurchaseLevel(productId, level) {
+  function setPurchasePct(productId, value) {
     var p = state().products.find(function (x) { return x.id === productId; });
-    if (!p) return;
-    level = Game.Core.Random.clamp(parseInt(level, 10) || 3, 1, 3);
-    p.purchaseLevel = level;
-    p.purchaseRate = PURCHASE_LEVEL_PCT[level];
+    p.purchaseRate = clampPct(value);
     renderPurchaseSection();
     Game.App.save();
+  }
+
+  function adjustPurchasePct(productId, dir) {
+    var p = state().products.find(function (x) { return x.id === productId; });
+    setPurchasePct(productId, p.purchaseRate + dir * PURCHASE_STEP);
   }
 
   // ================= シフト =================
@@ -416,14 +418,18 @@ Game.UI = Game.UI || {};
         r.playedWeekForesight.lines.map(function (l) { return "<li>" + esc(l) + "</li>"; }).join("") +
         "</ul>";
     }
+    // 2026-09-22（先週の状況パネル拡張）: 「仕入れの内容ごとの結果がわかるように」との
+    // 指摘に対応し、商品ごとの行に仕入れ費用（円）を明示した（従来は仕入れ数量のみで、
+    // 実際にいくら投じてどうなったかが分かりにくかった）。
     var itemRows = (r.itemStats || [])
       .map(function (it) {
         var profitCls = it.profit >= 0 ? "good" : "bad";
         return (
           '<div class="lastweek-item-row">' +
-            '<div class="lastweek-item-name">' + esc(it.name) + "</div>" +
+            '<div class="lastweek-item-name">' + esc(it.name) + " <span class=\"muted small\">Lv." + (it.masteryLevel || 1) + "</span></div>" +
             '<div class="small">価格 ' + fmt(it.priceAtSale) + "円 ／ 仕入 " + fmt(it.purchasedQty) +
-              "食 ／ 販売 " + fmt(it.soldQty) + "食 ／ 余り " + fmt(it.leftoverQty) + "食</div>" +
+              "食（仕入れ費用 " + fmt(it.purchaseCost || 0) + "円） ／ 販売 " + fmt(it.soldQty) +
+              "食 ／ 余り " + fmt(it.leftoverQty) + "食</div>" +
             '<div class="small ' + profitCls + '">利益 ' + fmt(it.profit) + "円　" +
               (it.avgSatisfaction != null ? "客の評価：" + esc(it.valueLabel) + "（満足度目安 " + it.avgSatisfaction + "）" : "客の評価：販売実績なし") +
             "</div>" +
@@ -431,11 +437,26 @@ Game.UI = Game.UI || {};
         );
       })
       .join("");
+    // 2026-09-22（先週の状況パネル拡張）:「満足できず帰った人の数を表示して」に対応し、
+    // 売り切れ／待ちきれず／価格が高すぎて、の3理由を内訳付きで表示する。
+    var leftDisappointed = r.leftDisappointed || 0;
+    var leftWaiting = r.leftWaiting || 0;
+    var leftPriceRejected = r.leftPriceRejected || 0;
+    var leftTotal = r.leftTotal != null ? r.leftTotal : leftDisappointed + leftWaiting + leftPriceRejected;
+    var leftHtml =
+      '<div class="small' + (leftTotal > 0 ? " bad" : "") + '" style="margin-top:6px;">' +
+        "満足できず帰った人：<b>" + fmt(leftTotal) + "人</b>" +
+        (leftTotal > 0
+          ? "（売り切れで諦めた " + fmt(leftDisappointed) + "人 ／ 待ちきれず " + fmt(leftWaiting) +
+            "人 ／ 値段が高すぎて " + fmt(leftPriceRejected) + "人）"
+          : "") +
+      "</div>";
     target.innerHTML =
       '<div class="lastweek-panel" style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.12);padding-top:8px;">' +
         '<div style="font-weight:bold;">📊 先週（第' + r.week + "週）の状況</div>" +
         "<div class=\"small\" style=\"margin-top:4px;\">利益 " + fmt(r.profit) + "円 ／ 客数 " + fmt(r.served) +
           "人 ／ 評判 " + r.reputationBefore + " → " + r.reputationAfter + "</div>" +
+        leftHtml +
         foresightHtml +
         '<div class="col" style="margin-top:8px;gap:4px;">' + itemRows + "</div>" +
       "</div>";
@@ -510,8 +531,8 @@ Game.UI = Game.UI || {};
     var action = t.getAttribute("data-action");
     if (action === "adjust-price-pct") {
       adjustPricePct(t.getAttribute("data-product"), parseInt(t.getAttribute("data-dir"), 10));
-    } else if (action === "set-purchase-level") {
-      setPurchaseLevel(t.getAttribute("data-product"), t.getAttribute("data-level"));
+    } else if (action === "adjust-purchase-pct") {
+      adjustPurchasePct(t.getAttribute("data-product"), parseInt(t.getAttribute("data-dir"), 10));
     } else if (action === "skill-up") {
       spendSkillPoint(t.getAttribute("data-skill"));
     } else if (action === "set-focus") {
@@ -539,6 +560,8 @@ Game.UI = Game.UI || {};
       setStaffManagementFocus(t.getAttribute("data-staff"), t.value);
     } else if (action === "set-price-pct") {
       setPricePct(t.getAttribute("data-product"), t.value);
+    } else if (action === "set-purchase-pct") {
+      setPurchasePct(t.getAttribute("data-product"), t.value);
     }
   }
 

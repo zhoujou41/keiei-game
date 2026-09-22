@@ -175,27 +175,25 @@ html, body {
   padding: 4px 6px;
 }
 
-/* ---- 仕入れ量レベル制（2026-09-22追加：Lv1〜Lv3、Lv3=Max） ---- */
-.purchase-level-buttons { display: flex; gap: 6px; margin-top: 4px; }
-.purchase-level-btn {
-  flex: 1;
-  padding: 6px 4px;
+/* ---- FIELD: 再生速度セレクト（2026-09-22改修：ボタン巡回→1〜20倍速の直接選択） ---- */
+.field-speed-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
   border-radius: var(--radius);
   border: 1px solid var(--border);
   background: var(--panel);
   color: var(--text);
-  cursor: pointer;
-  font-size: 0.8rem;
-  line-height: 1.3;
+  font-size: 0.82rem;
 }
-.purchase-level-btn .small { color: var(--text-dim); }
-.purchase-level-btn.active {
-  background: var(--accent2);
-  border-color: var(--accent2);
-  color: #14181f;
-  font-weight: bold;
+#field-speed-select {
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.82rem;
+  padding: 2px 0;
 }
-.purchase-level-btn.active .small { color: #14181f; }
 
 /* ---- シフト表（2026-09-22改修: 曜日チェック式グリッド） ---- */
 .shift-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }

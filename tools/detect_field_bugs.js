@@ -1,12 +1,15 @@
 // FIELD画面の「二重表示」「消える」「進む方向を向いていない」を毎フレーム自動検出する
 // 使い方: ゲームをローカルで配信（例: python3 -m http.server 8931）した状態で
-//   SPEED_CLICKS=0 WEEKS=1 node tools/detect_field_bugs.js   （x1で1週）
-//   SPEED_CLICKS=2 WEEKS=2 node tools/detect_field_bugs.js   （x3で2週）
+//   SPEED=1 WEEKS=1 node tools/detect_field_bugs.js    （x1で1週）
+//   SPEED=20 WEEKS=2 node tools/detect_field_bugs.js   （x20で2週）
 // 毎フレーム全キャラの座標・表示中のコマ画像を記録し、重なり（二重表示）・出口以外での消滅・
 // 進行方向と向きの不一致・持ち主のいない吹き出しを数える。scene.jsのwindow.__SCENE_DEBUGフックを使う。
 // playwrightのchromium実行ファイルのパスは環境に合わせて変更すること。
+// 2026-09-22: FIELD画面の速度指定がボタン巡回（#field-btn-speed）から1〜20倍速の
+// セレクトボックス（#field-speed-select）に変更されたため、SPEED_CLICKS（クリック回数）
+// ではなくSPEED（倍率そのもの）を指定する方式に更新した。
 const { chromium } = require('playwright');
-const SPEED_CLICKS = parseInt(process.env.SPEED_CLICKS || '0', 10); // 0=x1, 2=x3
+const SPEED = parseInt(process.env.SPEED || '1', 10); // 1〜20
 const WEEKS = parseInt(process.env.WEEKS || '1', 10);
 
 async function setupGame(page) {
@@ -108,7 +111,7 @@ async function setupGame(page) {
   for (let w = 0; w < WEEKS; w++) {
     await page.click('#btn-start-week');
     await page.waitForTimeout(300);
-    for (let s = 0; s < SPEED_CLICKS; s++) await page.click('#field-btn-speed');
+    if (SPEED !== 1) await page.selectOption('#field-speed-select', String(SPEED));
     let done = false;
     const t0 = Date.now();
     while (!done && Date.now() - t0 < 180000) {

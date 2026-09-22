@@ -35,17 +35,25 @@ Game.UI = Game.UI || {};
 (function () {
   var RESULT_DAY = 8;
 
-  // 倍速指定（停止・開始・倍速を指定できるように）。ボタンを押すたびに巡回する。
-  var SPEEDS = [1, 2, 3, 5];
-  var speedIndex = 0;
+  // 2026-09-22改修（ユーザー指摘「曜日ごとに一定時間がたってからの客の動きが速すぎる。
+  // 1倍速〜20倍速まで選べるようにして、1日を○秒で抑えるの仕様はなしにして」対応）:
+  // 従来の「1,2,3,5倍速をボタンで巡回」＋「1日を約8秒に収めるよう配分し直す
+  // （DAY_TARGET_MS/computeBeatDelays）」方式を廃止し、1〜20倍速を直接選べる
+  // セレクトボックスに変更。beatごとの表示間隔は「その日のbeat数」に一切依存しない
+  // 固定値（BASE_BEAT_MS）をそのまま倍速で割るだけにしたため、客が多い日は自然に長く、
+  // 少ない日は自然に短くなる（＝「1日を一定時間に収める」という仕様そのものをやめた）。
+  var MIN_SPEED = 1;
+  var MAX_SPEED = 20;
+  var speedMult = 1;
   function currentSpeed() {
-    return SPEEDS[speedIndex];
+    return speedMult;
   }
 
-  // 1日の目安再生時間（1倍速のとき）。実際の速度はcurrentSpeed()で割って短縮する。
-  var DAY_TARGET_MS = 8000;
-  var MIN_BEAT_MS = 55;
-  var MAX_BEAT_MS = 850;
+  // beatの種類ごとの基準表示間隔（1倍速のとき、ms）。曜日内のbeat数によらず固定。
+  var BASE_BEAT_MS_ACTION = 650; // 店内アニメーションを伴うbeat（入店・配膳・離脱など）
+  var BASE_BEAT_MS_DAY = 900; // 曜日の切り替わり
+  var BASE_BEAT_MS_PLAIN = 400; // その他の単なるテキスト情報
+  var MIN_BEAT_MS = 15; // 高倍速時でもゼロ秒にならないようにする下限
 
   var sceneInited = false;
   var allBeats = [];
@@ -260,8 +268,19 @@ Game.UI = Game.UI || {};
     btn.classList.toggle("btn-primary", !playing);
   }
 
-  function updateSpeedButtonLabel() {
-    el("field-btn-speed").textContent = "⏩ x" + currentSpeed();
+  var speedSelectWired = false;
+  function updateSpeedSelect() {
+    var sel = el("field-speed-select");
+    if (!sel) return;
+    if (!speedSelectWired) {
+      speedSelectWired = true;
+      var opts = "";
+      for (var v = MIN_SPEED; v <= MAX_SPEED; v++) {
+        opts += '<option value="' + v + '">x' + v + "</option>";
+      }
+      sel.innerHTML = opts;
+    }
+    sel.value = String(speedMult);
   }
 
   // ================= 再生ロジック =================
@@ -282,23 +301,14 @@ Game.UI = Game.UI || {};
     playIndexInDay++;
   }
 
-  // その日のbeat数に応じて、1beatあたりの表示間隔（1倍速基準）を動的に配分する。
-  // 「動きが伴うbeat」は少し長め、「曜日切り替え」はやや長め、それ以外の単なる
-  // テキスト情報は短め、という重み付けで合計がおおよそDAY_TARGET_MSに収まるようにする
-  // （客が少なくbeat数が少ない日は1beatあたりが伸び、逆に多い日は縮む＝どちらも
-  // 「約8秒」に揃う）。
+  // 2026-09-22改修: 「1日を約N秒に収める」ための日単位の再配分（旧DAY_TARGET_MS方式）を
+  // やめ、beatの種類ごとの固定表示間隔（1倍速基準）をそのまま返すだけにした。
+  // その日のbeat数が多ければ単純にその日の再生時間が長くなり、少なければ短くなる。
   function computeBeatDelays(beats) {
-    if (beats.length === 0) return [];
-    var weights = beats.map(function (b) {
-      if (b.action) return 2.2;
-      if (b.kind === "day") return 1.6;
-      return 1;
-    });
-    var total = weights.reduce(function (a, b) {
-      return a + b;
-    }, 0);
-    return weights.map(function (w) {
-      return Game.Core.Random.clamp((DAY_TARGET_MS * w) / total, MIN_BEAT_MS, MAX_BEAT_MS);
+    return beats.map(function (b) {
+      if (b.action) return BASE_BEAT_MS_ACTION;
+      if (b.kind === "day") return BASE_BEAT_MS_DAY;
+      return BASE_BEAT_MS_PLAIN;
     });
   }
 
@@ -349,10 +359,12 @@ Game.UI = Game.UI || {};
     }
   }
 
-  function toggleSpeed() {
-    speedIndex = (speedIndex + 1) % SPEEDS.length;
+  function setSpeed(mult) {
+    mult = Game.Core.Random.clamp(parseInt(mult, 10) || 1, MIN_SPEED, MAX_SPEED);
+    if (mult === speedMult) return;
+    speedMult = mult;
     Game.UI.Scene.setSpeed(currentSpeed());
-    updateSpeedButtonLabel();
+    updateSpeedSelect();
     if (playing) {
       // 次のstepから新しい間隔を反映させるため、いったん再スケジュール
       if (playTimer) {
@@ -595,8 +607,8 @@ Game.UI = Game.UI || {};
     ensureScene();
     allBeats = beats || [];
     currentResult = result;
-    speedIndex = 0;
-    updateSpeedButtonLabel();
+    speedMult = 1;
+    updateSpeedSelect();
     Game.UI.Scene.setSpeed(currentSpeed());
     groupBeatsByDay();
     precomputeItemStats();
@@ -607,7 +619,7 @@ Game.UI = Game.UI || {};
   function renderIdle() {
     ensureScene();
     Game.UI.Scene.renderIdle(el("scene-container"));
-    updateSpeedButtonLabel();
+    updateSpeedSelect();
     if (el("field-progress-bar")) el("field-progress-bar").innerHTML = "";
     if (el("field-item-stats")) el("field-item-stats").innerHTML = "";
     if (allBeats.length === 0 && el("field-log-mini")) {
@@ -618,7 +630,7 @@ Game.UI = Game.UI || {};
   Game.UI.Field = {
     start: start,
     togglePlay: togglePlay,
-    toggleSpeed: toggleSpeed,
+    setSpeed: setSpeed,
     skipToEnd: requestSkipToEnd,
     nextTurn: nextTurn,
     renderIdle: renderIdle,

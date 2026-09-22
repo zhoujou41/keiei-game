@@ -374,6 +374,7 @@ Game.Core = Game.Core || {};
       served: 0,
       leftDisappointed: 0, // 売り切れで代替もなく帰った
       leftWaiting: 0, // 待ちきれず帰った
+      leftPriceRejected: 0, // 2026-09-22追加: 全商品が価格天井を超えていて何も買えず帰った
       revenue: 0,
       satisfactionSum: 0,
       satisfactionCount: 0,
@@ -425,14 +426,30 @@ Game.Core = Game.Core || {};
       var enteredThisTick = 0;
       var enteredProductsThisTick = [];
       var disappointedThisTick = 0;
+      var priceRejectedThisTick = 0;
       for (var i = 0; i < arrivals; i++) {
-        // 商品選択（人気度 × 需要倍率 × 専門スキル × 価格弾力性）
-        var candidates = state.products.map(function (p) {
-          var priceFactor = Economy.priceDemandFactor(p, conditions);
-          var weight =
-            p.popularity * conditions.productDemandMult[p.id] * specialtyBonus(state, p.category) * priceFactor;
-          return { p: p, weight: Math.max(0.01, weight) };
-        });
+        // 商品選択（人気度 × 需要倍率 × 専門スキル × 価格弾力性）。
+        // 2026-09-22（価格天井対応）: 熟練度レベルごとの価格天井（Economy.priceCeiling）を
+        // 超える値付けの商品はpriceDemandFactorが0を返すため、候補から完全に除外する
+        // （＝いくら人気があっても、価格天井を超えた商品が選ばれることは無くなる）。
+        var candidates = state.products
+          .map(function (p) {
+            var priceFactor = Economy.priceDemandFactor(p, conditions, p.masteryLevel || 1);
+            var weight =
+              p.popularity * conditions.productDemandMult[p.id] * specialtyBonus(state, p.category) * priceFactor;
+            return { p: p, weight: weight, priceOk: priceFactor > 0 };
+          })
+          .filter(function (c) {
+            return c.priceOk;
+          });
+
+        if (candidates.length === 0) {
+          // 全商品が価格天井を超えていて、誰も何も買えない（極端な高値設定時のみ起こりうる）。
+          stats.leftPriceRejected++;
+          priceRejectedThisTick++;
+          continue;
+        }
+
         var wanted = Random.weightedPick(candidates, "weight").p;
 
         var chosen = wanted;
@@ -461,6 +478,14 @@ Game.Core = Game.Core || {};
 
       // このティックで実際に起きた「入店」「入店できず離脱」をそれぞれ1つのbeatにまとめる。
       // テキストと店内アニメーションが同じ人数・同じタイミングで対応するようにするため。
+      if (priceRejectedThisTick > 0) {
+        pushLogAction(
+          "💸",
+          priceRejectedThisTick + "名が来店したが、値段を見て購入意欲をなくし、何も注文せず帰ってしまった。",
+          "leave",
+          { type: "leave_disappointed", count: priceRejectedThisTick }
+        );
+      }
       if (disappointedThisTick > 0) {
         pushLogAction(
           "🚫",
@@ -596,7 +621,7 @@ Game.Core = Game.Core || {};
     // ---- 評判の変化 ----
     var avgSatisfaction = stats.satisfactionCount > 0 ? stats.satisfactionSum / stats.satisfactionCount : 50;
     var stockoutCount = Object.keys(stats.stockoutProducts).length;
-    var repDelta = (avgSatisfaction - 55) * 0.15 - stockoutCount * 0.8 - stats.leftWaiting * 0.05;
+    var repDelta = (avgSatisfaction - 55) * 0.15 - stockoutCount * 0.8 - stats.leftWaiting * 0.05 - stats.leftPriceRejected * 0.05;
     repDelta = Random.clamp(repDelta, -12, 12);
     state.reputation = Random.clamp(state.reputation + repDelta, 0, 100);
     if (repDelta >= 2) {
@@ -632,25 +657,46 @@ Game.Core = Game.Core || {};
     // （Economy.priceDemandFactor＝基準価格からの乖離に応じて需要が増減する仕組み）を
     // そのまま再利用し、「基準価格よりお得な価格設定だったか／割高だったか」として表現する
     // （＝味そのものを表す独立した数値データは無いため、価格の妥当性という形で代用する）。
+    // ---- 熟練度（累積販売数）の更新 ----（2026-09-22追加）
+    // 「レベルはその料理の熟練度。一定量さばくことでレベルを上げる」という指定に対応し、
+    // 週末（この時点で今週の販売数が確定している）に商品ごとの累積販売数へ加算し、
+    // 必要ならレベルアップの判定・ログを行う。次週の仕入れ・価格判定は既にこの週の
+    // runWeek()内で完了しているため、レベルアップの効果は「次に営業する週」から反映される。
+    state.products.forEach(function (p) {
+      var pb = stats.byProduct[p.id];
+      if (!pb || pb.sold <= 0) return;
+      p.cumulativeSold = (p.cumulativeSold || 0) + pb.sold;
+      var newLevel = Economy.masteryLevelForCumulative(p.cumulativeSold);
+      var oldLevel = p.masteryLevel || 1;
+      if (newLevel > oldLevel) {
+        p.masteryLevel = newLevel;
+        pushLog("📈", "「" + p.name + "」の熟練度がLv." + newLevel + "に上がった。値上げしても客が離れにくくなる。", "good");
+      }
+    });
+
     var itemStats = state.products.map(function (p) {
       var pb = stats.byProduct[p.id] || { sold: 0, revenue: 0, satisfactionSum: 0, satisfactionCount: 0 };
       var purchasedQty = purchase.quantities[p.id] || 0;
+      var purchaseCostYen = Math.round(purchasedQty * p.cost * purchase.costMult);
       var leftoverQty = Math.max(0, stockLeft[p.id] || 0);
       var itemProfit = pb.revenue - purchasedQty * p.cost * purchase.costMult;
       var avgSatisfaction = pb.satisfactionCount > 0 ? Math.round(pb.satisfactionSum / pb.satisfactionCount) : null;
-      var valueFactor = Economy.priceDemandFactor(p, conditions);
-      var valueLabel = valueFactor >= 1.15 ? "お得感あり" : valueFactor <= 0.85 ? "割高感あり" : "妥当な価格感";
+      var valueFactor = Economy.priceDemandFactor(p, conditions, p.masteryLevel || 1);
+      var valueLabel =
+        valueFactor <= 0 ? "高すぎて敬遠されている" : valueFactor >= 1.15 ? "お得感あり" : valueFactor <= 0.85 ? "割高感あり" : "妥当な価格感";
       return {
         productId: p.id,
         name: p.name,
         priceAtSale: p.currentPrice,
         cost: p.cost,
         purchasedQty: purchasedQty,
+        purchaseCost: purchaseCostYen,
         soldQty: pb.sold,
         leftoverQty: leftoverQty,
         profit: Math.round(itemProfit),
         avgSatisfaction: avgSatisfaction,
         valueLabel: valueLabel,
+        masteryLevel: p.masteryLevel || 1,
       };
     });
 
@@ -662,6 +708,8 @@ Game.Core = Game.Core || {};
       served: stats.served,
       leftDisappointed: stats.leftDisappointed,
       leftWaiting: stats.leftWaiting,
+      leftPriceRejected: stats.leftPriceRejected,
+      leftTotal: stats.leftDisappointed + stats.leftWaiting + stats.leftPriceRejected,
       reputationBefore: Math.round((state.reputation - repDelta) * 10) / 10,
       reputationAfter: Math.round(state.reputation * 10) / 10,
       repDelta: Math.round(repDelta * 10) / 10,

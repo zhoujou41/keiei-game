@@ -37,8 +37,12 @@ Game.Core = Game.Core || {};
       return Object.assign({}, p, {
         currentPrice: p.basePrice,
         pricePct: 100, // 基準価格に対する% (0〜10000で直接指定可能。office.js参照)
-        purchaseRate: 100, // 基準仕入れ量に対する% (2026-09-22〜: purchaseLevelから自動計算される)
-        purchaseLevel: 3, // 仕入れ量レベル（1〜3、3=Max。2026-09-22追加）
+        purchaseRate: 100, // 基準仕入れ量に対する% (0〜10000で直接指定可能。office.js参照)
+        // 2026-09-22（熟練度レベル対応）: 「レベル」はプレイヤーが設定する項目ではなく、
+        // その商品の累積販売数（cumulativeSold）から自動的に決まる「熟練度」。
+        // 詳細はeconomy.js Game.Core.Economy.masteryProgress()参照。
+        cumulativeSold: 0,
+        masteryLevel: 1,
         stock: 0,
       });
     });
@@ -137,17 +141,19 @@ Game.Core = Game.Core || {};
         if (p.purchaseRate == null) {
           p.purchaseRate = 100;
         }
-        // 2026-09-22（仕入れレベル制対応）: 旧セーブにはpurchaseLevelが無いため、
-        // 現在のpurchaseRate（%）から最も近いレベル（1〜3、3=Max=100%）を逆算して補完する
-        // （表示上の連続性を保つ。以後はレベル選択でpurchaseRateが上書きされる）。
-        if (p.purchaseLevel == null) {
-          var levelPct = { 1: 34, 2: 67, 3: 100 };
-          var bestLevel = 3, bestDiff = Infinity;
-          Object.keys(levelPct).forEach(function (lv) {
-            var diff = Math.abs(p.purchaseRate - levelPct[lv]);
-            if (diff < bestDiff) { bestDiff = diff; bestLevel = parseInt(lv, 10); }
-          });
-          p.purchaseLevel = bestLevel;
+        // 2026-09-22（仕入れレベル制→熟練度制への訂正）: 一時期「仕入れ量のレベル制
+        // （Lv1〜3）」を実装したが、ユーザーからのフィードバックで「レベルは料理の
+        // 熟練度であり、仕入れ量の設定項目ではない」と訂正された。旧仕様のpurchaseLevel
+        // フィールドは廃止し、代わりに累積販売数ベースの熟練度（cumulativeSold/
+        // masteryLevel）を導入する。旧フィールドが残っている場合は削除だけしておく。
+        if ("purchaseLevel" in p) {
+          delete p.purchaseLevel;
+        }
+        if (p.cumulativeSold == null) {
+          p.cumulativeSold = 0;
+        }
+        if (p.masteryLevel == null) {
+          p.masteryLevel = Game.Core.Economy.masteryLevelForCumulative(p.cumulativeSold);
         }
       });
     }

@@ -157,8 +157,8 @@ window.Game = window.Game || {};
       el("field-btn-play").addEventListener("click", function () {
         Game.UI.Field.togglePlay();
       });
-      el("field-btn-speed").addEventListener("click", function () {
-        Game.UI.Field.toggleSpeed();
+      el("field-speed-select").addEventListener("change", function (e) {
+        Game.UI.Field.setSpeed(parseInt(e.target.value, 10));
       });
       el("field-btn-skip").addEventListener("click", function () {
         Game.UI.Field.skipToEnd();
