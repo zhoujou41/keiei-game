@@ -96,24 +96,40 @@ Game.UI = Game.UI || {};
   }
 
   // ---- ④初期メニュー ----
+  var MENU_PICK_COUNT = 3;
+
   function renderStepMenu() {
     var t = answers.storeType ? Game.Data.getStoreType(answers.storeType) : null;
     if (!t) return "<h3>初期メニューを決める</h3><div class='muted small'>先に業種を選んでください。</div>";
     var catalog = Game.Data.getProductsByCategory(t.category);
+    var remain = MENU_PICK_COUNT - answers.productIds.length;
     var html = catalog.map(function (p) {
       var isChecked = answers.productIds.indexOf(p.id) !== -1;
+      var full = !isChecked && answers.productIds.length >= MENU_PICK_COUNT;
       var checked = isChecked ? "checked" : "";
+      var disabled = full ? "disabled" : "";
+      var imgSrc = Game.Data.FoodAssets ? Game.Data.FoodAssets[p.foodKey] : "";
+      var filter = Game.Data.foodTintFilter ? Game.Data.foodTintFilter(p.tint) : "";
+      var imgStyle = filter ? ' style="filter:' + filter + ';"' : "";
+      var img = imgSrc
+        ? '<div class="setup-menu-card-img"><img src="' + esc(imgSrc) + '" alt=""' + imgStyle + "></div>"
+        : "";
+      var grossMargin = p.basePrice - p.cost;
       return (
-        '<label class="setup-menu-card' + (isChecked ? " checked" : "") + '">' +
-          '<input type="checkbox" data-action="toggle-product" data-id="' + p.id + '" ' + checked + ">" +
+        '<label class="setup-menu-card' + (isChecked ? " checked" : "") + (full ? " disabled" : "") + '">' +
+          '<input type="checkbox" data-action="toggle-product" data-id="' + p.id + '" ' + checked + " " + disabled + ">" +
+          img +
           '<div class="setup-card-title">' + p.icon + " " + esc(p.name) + "</div>" +
-          '<div class="muted small">価格 ' + p.basePrice + "円 / 原価 " + p.cost + "円</div>" +
+          '<div class="muted small">価格 ' + p.basePrice + "円 / 原価 " + p.cost + "円 / 粗利 " + grossMargin + "円</div>" +
         "</label>"
       );
     }).join("");
+    var statusMsg = remain > 0
+      ? "あと " + remain + " 種類選んでください。"
+      : "3種類選択済みです。";
     return (
       "<h3>最初のメニューを決める</h3>" +
-      '<div class="muted small" style="margin-bottom:10px;">' + esc(t.name) + "の中から、開業時に出す商品を選んでください（1つ以上）。後から増やせるようになる予定です。</div>" +
+      '<div class="muted small" style="margin-bottom:10px;">' + esc(t.name) + "の中から、開業時に出す商品をちょうど3種類選んでください。<br>" + statusMsg + "</div>" +
       '<div class="setup-menu-grid">' + html + "</div>"
     );
   }
@@ -122,7 +138,7 @@ Game.UI = Game.UI || {};
     if (step === 1) return !!answers.difficulty;
     if (step === 2) return !!answers.storeType;
     if (step === 3) return true; // 店名は空欄可（デフォルト名で補完）
-    if (step === 4) return answers.productIds.length > 0;
+    if (step === 4) return answers.productIds.length === MENU_PICK_COUNT;
     return false;
   }
 
@@ -174,8 +190,12 @@ Game.UI = Game.UI || {};
 
   function toggleProduct(id) {
     var idx = answers.productIds.indexOf(id);
-    if (idx === -1) answers.productIds.push(id);
-    else answers.productIds.splice(idx, 1);
+    if (idx === -1) {
+      if (answers.productIds.length >= MENU_PICK_COUNT) return; // 3つまで
+      answers.productIds.push(id);
+    } else {
+      answers.productIds.splice(idx, 1);
+    }
     render();
   }
 

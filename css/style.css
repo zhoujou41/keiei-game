@@ -126,26 +126,6 @@ html, body {
 
 .product-card .title { font-weight: bold; font-size: 0.95rem; }
 
-.rate-btns { display: flex; gap: 4px; margin-top: 6px; }
-
-.rate-btn {
-  flex: 1;
-  padding: 6px 2px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 0.8rem;
-}
-
-.rate-btn.active {
-  background: var(--accent);
-  color: #221a08;
-  border-color: var(--accent);
-  font-weight: bold;
-}
-
 .price-adjust { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
 .price-adjust button {
   width: 28px; height: 28px;
@@ -156,16 +136,70 @@ html, body {
   cursor: pointer;
 }
 
-/* ---- スタッフテーブル ---- */
-.staff-card {
-  background: var(--panel2);
+/* ---- 仕入れ: 販売価格/仕入れ量の%直接入力＋±ボタン（2026-09-22改修） ---- */
+.pct-adjust { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.pct-adjust button {
+  width: 28px; height: 28px;
+  flex: 0 0 auto;
+  border-radius: 50%;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 10px;
-  margin-bottom: 8px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+}
+.pct-input {
+  width: 72px;
+  text-align: right;
+  padding: 4px 6px;
 }
 
-.staff-card .name-row { display: flex; justify-content: space-between; align-items: center; font-weight: bold; }
+/* ---- シフト表（2026-09-22改修: 曜日チェック式グリッド） ---- */
+.shift-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.shift-table { border-collapse: collapse; width: 100%; font-size: 0.78rem; }
+.shift-table th, .shift-table td {
+  padding: 5px 4px;
+  text-align: center;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.shift-table th { color: var(--text-dim); font-weight: normal; font-size: 0.72rem; }
+.shift-table td:first-child, .shift-table th:first-child { text-align: left; padding-left: 2px; }
+.shift-table select { padding: 2px 3px; font-size: 0.75rem; }
+.shift-table input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
+.staff-name-link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-weight: bold;
+  cursor: pointer;
+  padding: 2px 4px;
+  text-decoration: underline;
+  font-size: inherit;
+}
+
+/* ---- スタッフ詳細の子画面（モーダル） ---- */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  z-index: 60;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.modal-overlay.show { display: flex; }
+.modal-box {
+  background: var(--panel2);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 16px;
+  max-width: 360px;
+  width: 100%;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+.modal-head { display: flex; justify-content: space-between; align-items: center; font-size: 1.05rem; }
 
 .stat-bar-wrap { display: flex; align-items: center; gap: 6px; font-size: 0.78rem; }
 .stat-bar-bg { flex: 1; height: 6px; background: #12141a; border-radius: 4px; overflow: hidden; }
@@ -240,86 +274,115 @@ input[type="range"] { width: 100%; }
 
 #start-week-bar .btn-primary { width: 100%; max-width: 420px; padding: 12px; font-size: 1rem; }
 
-/* ---- FIELD 画面 ---- */
-#field-day-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+/* ---- FIELD 画面（2026-09-22全面改修：モバイル1画面表示） ---- */
+/* fieldのpanelだけ他画面より余白を詰め、1画面に収まる余地を確保する。 */
+.field-panel { padding: 8px; margin-bottom: 6px; }
 
-.day-tab {
-  flex: 1 1 auto;
-  min-width: 30px;
-  padding: 6px 4px;
-  border-radius: 8px;
+/* 伸びる進捗バー（月〜日）。日をまたいで連続再生される中、今どこにいるかが
+   一目でわかるように、区画ごとにbeatの再生割合で連続的に伸びる塗りつぶしを描く。
+   クリックでその日へジャンプできる。 */
+#field-progress-bar { display: flex; gap: 3px; margin-bottom: 6px; }
+
+.progress-seg {
+  position: relative;
+  flex: 1 1 0;
+  height: 22px;
+  border-radius: 5px;
   border: 1px solid var(--border);
-  background: var(--panel);
-  color: var(--text-dim);
+  background: var(--panel2);
+  overflow: hidden;
   cursor: pointer;
-  font-size: 0.8rem;
-  text-align: center;
 }
-.day-tab:hover { border-color: var(--accent); }
-.day-tab.active { background: var(--accent); color: #221a08; border-color: var(--accent); font-weight: bold; }
+.progress-seg .progress-fill {
+  position: absolute;
+  inset: 0;
+  width: 0%;
+  background: var(--accent);
+  opacity: 0.85;
+  transition: width 0.15s linear;
+}
+.progress-seg .progress-label {
+  position: relative;
+  z-index: 1;
+  display: block;
+  text-align: center;
+  font-size: 0.72rem;
+  line-height: 22px;
+  color: var(--text);
+  mix-blend-mode: difference;
+}
+.progress-seg.active { border-color: var(--accent); }
+.progress-seg.done .progress-fill { opacity: 0.55; }
 
-#field-status-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
-
-.status-chip {
+/* 商品ごとの「販売/仕入・利益」をリアルタイム表示するコンパクトな一覧。 */
+#field-item-stats { display: flex; flex-direction: column; gap: 3px; margin: 6px 0; }
+.item-stat-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
   background: var(--panel2);
   border: 1px solid var(--border);
-  border-radius: 20px;
-  padding: 5px 12px;
-  font-size: 0.8rem;
+  border-radius: 7px;
+  padding: 4px 8px;
+  font-size: 0.74rem;
+  white-space: nowrap;
 }
+.item-stat-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; font-weight: bold; }
+.item-stat-num { color: var(--text-dim); }
+.item-stat-num b { color: var(--text); }
+.item-stat-num b.good { color: var(--good); }
+.item-stat-num b.bad { color: var(--bad); }
 
-#field-log {
+/* 直近1行だけを表示するミニログ（複数行ログ・提供/離脱チップは廃止し省スペース化）。 */
+#field-log-mini {
   background: #12141a;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 8px;
-  min-height: 108px;
-  font-size: 0.85rem;
+  padding: 6px 8px;
+  min-height: 30px;
+  font-size: 0.8rem;
   display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 4px;
+  align-items: center;
+  margin-bottom: 6px;
 }
+.log-line-mini { width: 100%; }
+.log-line-mini .icon { margin-right: 4px; }
+.log-line-mini.day { color: var(--accent); font-weight: bold; text-align: center; }
+.log-line-mini.event { color: var(--accent2); }
+.log-line-mini.warn { color: var(--warn); }
+.log-line-mini.stockout { color: var(--bad); font-weight: bold; }
+.log-line-mini.leave { color: var(--bad); }
+.log-line-mini.enter { color: var(--good); }
+.log-line-mini.sale { color: var(--accent2); }
+.log-line-mini.staff { color: #d693ff; }
+.log-line-mini.result { color: var(--text); font-weight: bold; }
+.log-line-mini.good { color: var(--good); font-weight: bold; }
+.log-line-mini.bad { color: var(--bad); font-weight: bold; }
+.log-line-mini.muted-line { color: var(--text-dim); text-align: center; }
 
-.log-line { padding: 6px 8px; border-radius: 6px; background: rgba(255,255,255,0.02); transition: opacity 0.15s ease; }
-.log-line .icon { margin-right: 4px; }
-.log-line.day { color: var(--accent); font-weight: bold; text-align: center; background: none; }
-.log-line.event { color: var(--accent2); }
-.log-line.warn { color: var(--warn); }
-.log-line.stockout { color: var(--bad); font-weight: bold; }
-.log-line.leave { color: var(--bad); }
-.log-line.enter { color: var(--good); }
-.log-line.sale { color: var(--accent2); }
-.log-line.staff { color: #d693ff; }
-.log-line.result { color: var(--text); font-weight: bold; background: rgba(255,255,255,0.06); }
-.log-line.good { color: var(--good); font-weight: bold; }
-.log-line.bad { color: var(--bad); font-weight: bold; }
-
-.log-line.past { opacity: 0.45; font-size: 0.82rem; }
-.log-line.current { opacity: 1; background: rgba(255,255,255,0.06); font-size: 0.92rem; }
-.log-line.muted-line { color: var(--text-dim); text-align: center; background: none; padding: 20px 8px; }
-
-#field-controls { display: flex; gap: 8px; margin: 10px 0; justify-content: center; flex-wrap: wrap; }
+#field-controls { display: flex; gap: 6px; margin: 8px 0 0; justify-content: center; flex-wrap: wrap; }
+#field-controls .btn { padding: 8px 10px; font-size: 0.82rem; }
 
 #field-result {
   display: none;
   background: var(--panel2);
   border: 1px solid var(--accent);
   border-radius: var(--radius);
-  padding: 14px;
-  margin-top: 12px;
+  padding: 10px;
+  margin-top: 8px;
 }
 
 #field-result.show { display: block; }
 
-.result-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 10px 0; }
-.result-item { background: var(--panel); border-radius: 8px; padding: 8px; text-align: center; }
-.result-item .label { font-size: 0.75rem; color: var(--text-dim); }
-.result-item .value { font-size: 1.15rem; font-weight: bold; }
+.result-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 8px 0; }
+.result-item { background: var(--panel); border-radius: 8px; padding: 5px; text-align: center; }
+.result-item .label { font-size: 0.65rem; color: var(--text-dim); }
+.result-item .value { font-size: 0.92rem; font-weight: bold; }
 .result-item .value.good { color: var(--good); }
 .result-item .value.bad { color: var(--bad); }
 
-.goal-banner { padding: 8px; border-radius: 8px; margin-bottom: 10px; font-size: 0.85rem; }
+.goal-banner { padding: 6px; border-radius: 8px; margin-bottom: 6px; font-size: 0.78rem; }
 .goal-banner.success { background: rgba(91,209,122,0.15); border: 1px solid var(--good); }
 .goal-banner.fail { background: rgba(239,107,107,0.15); border: 1px solid var(--bad); }
 
@@ -392,14 +455,16 @@ input[type="range"] { width: 100%; }
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
-  margin-bottom: 10px;
+  margin-bottom: 6px;
 }
-#scene-svg { width: 100%; height: auto; display: block; max-height: 60vh; }
+/* 2026-09-22（フィールド全面改修）: モバイル1画面表示のため60vh→38vhに縮小し、
+   進捗バー・商品別実績・ログ・操作ボタンがすべて同じ画面内に収まるようにした。
+   週の結果表示中（.result-active）はさらに縮め、結果パネルの表示スペースを確保する。 */
+#scene-svg { width: 100%; height: auto; display: block; max-height: 38vh; transition: max-height 0.2s ease; }
+.field-panel.result-active #scene-svg { max-height: 16vh; }
 /* v3: LimeZu素材はネイティブ32pxのドット絵を拡大表示するため、
    にじませず輪郭をくっきり出す（ぼやけた拡大＝ちびキャラの魅力が失われるため必須）。 */
 #scene-svg image { image-rendering: pixelated; image-rendering: crisp-edges; }
-
-#field-btn-speed.active { background: var(--accent); color: #221a08; border-color: var(--accent); font-weight: bold; }
 
 /* ---- SETUP（開業準備）画面 ---- */
 .setup-stepper {
@@ -474,6 +539,17 @@ input[type="range"] { width: 100%; }
 .setup-menu-card.checked,
 .setup-menu-card:has(input:checked) { border-color: var(--accent); background: rgba(242,169,59,0.12); }
 .setup-menu-card input[type="checkbox"] { position: absolute; top: 8px; right: 8px; }
+.setup-menu-card.disabled { opacity: 0.4; cursor: not-allowed; }
+.setup-menu-card-img {
+  width: 100%;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 6px;
+  overflow: hidden;
+}
+.setup-menu-card-img img { max-width: 56px; max-height: 56px; object-fit: contain; }
 
 /* ---- 🔮 未来視パネル（OFFICE / FIELD 共通） ---- */
 .foresight-panel {

@@ -36,13 +36,20 @@ Game.Core = Game.Core || {};
     var products = sourceProducts.map(function (p) {
       return Object.assign({}, p, {
         currentPrice: p.basePrice,
-        purchaseRate: 100,
+        pricePct: 100, // 基準価格に対する% (0〜10000で直接指定可能。office.js参照)
+        purchaseRate: 100, // 基準仕入れ量に対する% (同上)
         stock: 0,
       });
     });
 
     var staff = Game.Data.INITIAL_STAFF.map(function (s) {
-      return Object.assign({}, s, { aptitude: Object.assign({}, s.aptitude) });
+      // aptitude/workDaysMask/managementFocusは参照型なので、他のセーブ/次回作成と
+      // 共有されないよう必ずディープコピーする（配列・オブジェクトの浅いコピー事故防止）。
+      return Object.assign({}, s, {
+        aptitude: Object.assign({}, s.aptitude),
+        workDaysMask: (s.workDaysMask || []).slice(),
+        managementFocus: Object.assign({ guidance: 50, morale: 50 }, s.managementFocus),
+      });
     });
 
     var skills = {};
@@ -63,7 +70,6 @@ Game.Core = Game.Core || {};
       skills: skills,
       skillPoints: 2, // 初期ポイント（チュートリアル的に少し使える）
       focusSkill: null,
-      management: { service: 34, cooking: 33, morale: 33 },
       milestoneLength: 4,
       milestoneIndex: 1,
       milestoneAccum: { revenue: 0, profit: 0, customers: 0 },
@@ -73,7 +79,7 @@ Game.Core = Game.Core || {};
       gameOverReason: null,
       debtWarnings: 0,
       currentWeekConditions: null, // その週の「真の」隠し条件
-      currentWeekForesight: null, // その週の「日々の未来視」（月〜日の抽象ヒント。全員デフォルトで無料）
+      currentWeekForesight: null, // その週の「今週の未来視」（週全体のなんとなくの抽象ヒント。全員デフォルトで無料）
       lastWeekBeats: [], // FIELD画面で再生する「1行=1演出」の統合イベント列（テキスト＋シーン演出）
       lastWeekResult: null,
       layout: Game.Data.createDefaultLayout(),
@@ -81,7 +87,7 @@ Game.Core = Game.Core || {};
 
     state.currentGoal = Game.Core.Goals.generateGoal(state, state.milestoneIndex);
     state.currentWeekConditions = Game.Core.Simulation.generateWeekConditions(state);
-    state.currentWeekForesight = Game.Core.Simulation.getDailyForesight(state);
+    state.currentWeekForesight = Game.Core.Simulation.getWeekForesight(state);
 
     return state;
   }
@@ -122,10 +128,67 @@ Game.Core = Game.Core || {};
           var def = Game.Data.getProductDef(p.id);
           if (def && def.foodKey) p.foodKey = def.foodKey;
         }
+        // 2026-09-22（仕入れUI改修）: 旧セーブにはpricePctが無いため、
+        // 現在のcurrentPrice/basePriceから逆算して補完する（表示上の連続性を保つ）。
+        if (p.pricePct == null) {
+          p.pricePct = p.basePrice > 0 ? Math.round((p.currentPrice / p.basePrice) * 100) : 100;
+        }
+        if (p.purchaseRate == null) {
+          p.purchaseRate = 100;
+        }
       });
     }
+    // 2026-09-22（シフト改修）: 役割register/otherを廃止しservice/choresへ統合、
+    // 呼込(calling)を新設。曜日ごとのシフト（workDaysMask）とマネジメント方針
+    // （managementFocus）が無い旧セーブには補完する。
+    if (state.staff) {
+      state.staff.forEach(function (st) {
+        if (st.role === "register") st.role = "service";
+        if (st.role === "other") st.role = "chores";
+        if (st.aptitude) {
+          if (st.aptitude.calling == null) {
+            st.aptitude.calling = Math.round((st.aptitude.cooking + st.aptitude.service) / 2 * 0.6);
+          }
+          if (st.aptitude.chores == null) {
+            st.aptitude.chores = st.aptitude.other != null ? st.aptitude.other : 30;
+          }
+          delete st.aptitude.register;
+          delete st.aptitude.other;
+        }
+        if (!st.workDaysMask) {
+          var mask = [false, false, false, false, false, false, false];
+          // workDays（人数）ぶんだけ月曜起点でONにする（大まかな後方互換の近似）
+          for (var di = 0; di < st.workDays && di < 7; di++) mask[di] = true;
+          st.workDaysMask = mask;
+        }
+        if (!st.managementFocus) {
+          st.managementFocus = { guidance: 50, morale: 50 };
+        }
+      });
+    }
+    // 2026-09-22: 「今週の未来視」を曜日別(days)から週全体の要約(lines)に変更。
+    // 旧形式のセーブ（daysを持つ／linesを持たない）は破棄して再生成する。
+    if (state.currentWeekForesight && !state.currentWeekForesight.lines) {
+      state.currentWeekForesight = null;
+    }
     if (!state.currentWeekForesight && state.currentWeekConditions) {
-      state.currentWeekForesight = Game.Core.Simulation.getDailyForesight(state);
+      state.currentWeekForesight = Game.Core.Simulation.getWeekForesight(state);
+    }
+    // 2026-09-22: 経営目標「今週の試練」表示に説明文(description)・太字概要(summary)を追加。
+    // 旧セーブのcurrentGoalには存在しないため補完する。
+    if (state.currentGoal && (!state.currentGoal.description || !state.currentGoal.summary)) {
+      var g = state.currentGoal;
+      if (!g.description) {
+        g.description =
+          "第" + g.milestoneIndex + "期の試練です。" + g.untilWeek +
+          "週目までの間に、以下の数値を達成することが求められています。未達成でも即ゲームオーバーにはなりませんが、" +
+          "評判低下や追加コストなど経営が苦しくなる影響があります。";
+      }
+      if (!g.summary) {
+        var parts = ["累積利益 " + g.minProfit.toLocaleString() + "円以上", "評判 " + g.minReputation + "以上"];
+        if (g.minCustomers != null) parts.push("累積客数 " + g.minCustomers + "人以上");
+        g.summary = parts.join(" ・ ");
+      }
     }
     return state;
   }

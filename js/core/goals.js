@@ -23,6 +23,22 @@ Game.Core = Game.Core || {};
       goal.minCustomers = Math.round(180 * difficulty);
     }
 
+    // ---- 「今週の試練」表示用テキスト（2026-09-22追加） ----
+    // description: 目標の位置づけを説明する導入文（先に表示）。
+    // summary: 目標の概要を太字で見せるための短い1行まとめ。
+    goal.description =
+      "第" + milestoneIndex + "期の試練です。" + state.week + "週目から" + goal.untilWeek +
+      "週目までの間に、以下の数値を達成することが求められています。未達成でも即ゲームオーバーにはなりませんが、" +
+      "評判低下や追加コストなど経営が苦しくなる影響があります。";
+    var summaryParts = [
+      "累積利益 " + minProfit.toLocaleString() + "円以上",
+      "評判 " + minReputation + "以上",
+    ];
+    if (goal.minCustomers != null) {
+      summaryParts.push("累積客数 " + goal.minCustomers + "人以上");
+    }
+    goal.summary = summaryParts.join(" ・ ");
+
     return goal;
   }
 

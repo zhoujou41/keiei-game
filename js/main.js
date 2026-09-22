@@ -151,6 +151,8 @@ window.Game = window.Game || {};
       });
     },
 
+    // 2026-09-22（フィールド全面改修）: 「前の日／次の日」ボタンは廃止し、進捗バーの
+    // クリックで任意の日へジャンプする方式に統一した（Game.UI.Field.jumpToDayByClick）。
     wireFieldControls: function () {
       el("field-btn-play").addEventListener("click", function () {
         Game.UI.Field.togglePlay();
@@ -160,12 +162,6 @@ window.Game = window.Game || {};
       });
       el("field-btn-skip").addEventListener("click", function () {
         Game.UI.Field.skipToEnd();
-      });
-      el("field-btn-prevday").addEventListener("click", function () {
-        Game.UI.Field.prevDay();
-      });
-      el("field-btn-nextday").addEventListener("click", function () {
-        Game.UI.Field.nextDay();
       });
     },
 

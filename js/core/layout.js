@@ -65,6 +65,13 @@ Game.Core = Game.Core || {};
     return null;
   }
 
+  // 受け渡しカウンター（コック→ウェイターの食事の中継地点）。
+  function counterCell(layout) {
+    var counters = cellsOfCategory(layout, "counter");
+    if (counters.length > 0) return counters[0];
+    return null;
+  }
+
   // 指定セル（オブジェクトの位置）に隣接する歩行可能マスを1つ返す（無ければnull）
   function interactionPoint(layout, x, y) {
     var pts = Game.Core.Pathfind.findAdjacentWalkable(x, y, walkableFnFor(layout), layout.cols, layout.rows);
@@ -95,6 +102,7 @@ Game.Core = Game.Core || {};
     tables: tables,
     kitchenStations: kitchenStations,
     registerCell: registerCell,
+    counterCell: counterCell,
     interactionPoint: interactionPoint,
     seatsForTable: seatsForTable,
   };

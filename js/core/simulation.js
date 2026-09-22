@@ -14,8 +14,17 @@ Game.Core = Game.Core || {};
   var CATEGORIES = ["中華", "和食", "洋食", "デザート"];
   // スタッフの「能力×適性×やる気」の合計値を、1ティックあたりの処理能力に変換する係数。
   // バランス調整用の定数（数値を変えるだけで難易度全体を調整できる）。
-  var CAPACITY_MULT = 15;
-  var BASE_WEEKLY_TRAFFIC = 190;
+  // 2026-09-22（仕入れUI改修）: products.jsのbaseStock再計算（「100%/100%で完売なら
+  // 週+20万円程度」を狙った値）に合わせて、CAPACITY_MULTとBASE_WEEKLY_TRAFFICも
+  // 拡大した（旧値: 15 / 190）。
+  // 2026-09-22（シフト改修）: 初期スタッフを4名→2名に減らしたことで処理能力が大きく
+  // 下がったため、CAPACITY_MULTを90→180に再調整。実際にrunWeek()を各業種300回試行して
+  // 検証済み（初期スタッフ2名・100%/100%設定）: 中華・和食・洋食は平均17〜18万円の黒字、
+  // ピークで20万円前後まで到達。デザートも平均16万円・ピーク22万円程度で、
+  // 4業種とも「+20万円程度」の目標にほぼ揃った。ボトルネックは処理能力ではなく
+  // 在庫切れ（仕入れ量100%では週内に売り切れることが多い）が中心になっている。
+  var CAPACITY_MULT = 180;
+  var BASE_WEEKLY_TRAFFIC = 950;
 
   function skillLevel(state, id) {
     return (state.skills && state.skills[id]) || 0;
@@ -142,32 +151,29 @@ Game.Core = Game.Core || {};
     "天気の影響で、外を歩く人はやや少なめかもしれません",
   ];
 
-  // ---- 「日々の未来視」：曜日ごとの抽象的な予兆・傾向（全員デフォルトで無料の基本情報） ----
-  // EASY/NORMAL/HARDとは別のシステム。具体的な数値・正解は一切出さず、
-  // 「何が起こりそうか」だけを示す（「何をすればいいか」は教えない）。
-  function getDailyForesight(state) {
+  // ---- 「今週の未来視」：週全体をまとめた、なんとなくの抽象的な予兆・傾向 ----
+  // （2026-09-22改修: 曜日ごとの個別予想は廃止し、週全体でざっくり1つの予想にまとめた。
+  //  EASY/NORMAL/HARDとは別のシステム。具体的な数値・正解は一切出さず、
+  //  「何が起こりそうか」だけを示す（「何をすればいいか」は教えない）。）
+  function getWeekForesight(state) {
     var cond = state.currentWeekConditions;
-    if (!cond) return { days: [] };
-    var ingredientLine = ingredientWord(cond.ingredientCostMult);
-    var days = DAY_NAMES.map(function (label, idx) {
-      var lines = [];
-      lines.push(trafficWord(cond.dayTraffic ? cond.dayTraffic[idx] : 1));
+    if (!cond) return { lines: [] };
+    var lines = [];
+    lines.push(trafficWord(cond.trafficMult));
 
-      if (state.products && state.products.length > 0) {
-        var candidates = state.products.map(function (p) {
-          var mult = (cond.productDemandMult && cond.productDemandMult[p.id]) || 1;
-          return { name: p.name, mult: mult, weight: Math.max(0.05, mult) };
-        });
-        var featured = Random.weightedPick(candidates, "weight");
-        lines.push(demandWord(featured.name, featured.mult));
-      }
+    if (state.products && state.products.length > 0) {
+      var candidates = state.products.map(function (p) {
+        var mult = (cond.productDemandMult && cond.productDemandMult[p.id]) || 1;
+        return { name: p.name, mult: mult, weight: Math.max(0.05, mult) };
+      });
+      var featured = Random.weightedPick(candidates, "weight");
+      lines.push(demandWord(featured.name, featured.mult));
+    }
 
-      lines.push(ingredientLine);
-      lines.push(Random.pick(ATMOSPHERE_HINTS));
+    lines.push(ingredientWord(cond.ingredientCostMult));
+    lines.push(Random.pick(ATMOSPHERE_HINTS));
 
-      return { day: idx + 1, label: label, lines: lines };
-    });
-    return { days: days };
+    return { lines: lines };
   }
 
   // ---- スキルによる事前情報（ヒント）テキスト生成 ----
@@ -232,6 +238,11 @@ Game.Core = Game.Core || {};
   function runWeek(state) {
     var beats = [];
     var conditions = state.currentWeekConditions;
+    // この週を実際にプレイする直前の「今週の未来視」をスナップショットしておく。
+    // 関数末尾で次週分のcurrentWeekForesightに上書きしてしまうため、それより前に
+    // 確保しておかないと、FIELD画面のリプレイ時に「次の週」の予想が出てしまう
+    // （OFFICE画面で見たものと必ず一致させるための対応）。
+    var playedWeekForesight = state.currentWeekForesight;
     // 曜日インデックス: 0=準備（営業開始前）, 1〜7=月〜日, 8=結果
     var currentDay = 0;
 
@@ -283,9 +294,17 @@ Game.Core = Game.Core || {};
     );
 
     // ---- スタッフの稼働準備 ----
+    // 2026-09-22（シフト改修）: 勤務日は曜日ごとのチェック（workDaysMask、0=月…6=日）で
+    // 指定されるようになった。reliability（信頼度）自体はやる気ベースで曜日に依存しないが、
+    // 実際にその曜日に働くかどうかはworksOnDay()で曜日ごとに判定する。
+    function worksOnDay(s, dayIdx) {
+      if (s.workDaysMask) return !!s.workDaysMask[dayIdx];
+      return s.workDays > 0; // 後方互換（旧セーブ・マスク未設定分）
+    }
+
     var reliability = {};
     state.staff.forEach(function (s) {
-      if (s.workDays <= 0) {
+      if (!s.workDays || s.workDays <= 0) {
         reliability[s.id] = 0;
         return;
       }
@@ -294,10 +313,10 @@ Game.Core = Game.Core || {};
     });
 
     var slackLogged = {};
-    function staffCapacity(role) {
+    function staffCapacity(role, dayIdx) {
       var total = 0;
       state.staff.forEach(function (s) {
-        if (s.role !== role || s.workDays <= 0) return;
+        if (s.role !== role || !worksOnDay(s, dayIdx)) return;
         var rel = reliability[s.id];
         // やる気が低いとサボる確率
         if (s.motivation < 40 && Random.rand() < 0.35 && !slackLogged[s.id]) {
@@ -310,24 +329,35 @@ Game.Core = Game.Core || {};
       return total;
     }
 
-    var kitchenCapPerTick = staffCapacity("cooking") * CAPACITY_MULT;
-    var serviceCapPerTick = staffCapacity("service") * CAPACITY_MULT;
-    var registerCapPerTick = staffCapacity("register") * CAPACITY_MULT;
-    var otherCapPerTick = staffCapacity("other") * CAPACITY_MULT;
-
-    // レジ担当がいると、接客の実質的な回転がわずかに速くなる
-    serviceCapPerTick += registerCapPerTick * 0.3;
-
-    if (kitchenCapPerTick < 2.5) {
-      pushLog("⚠️", "調理担当の手が足りていない。注文をさばき切れなそうだ…", "warn");
+    // 調理・接客・雑務の処理能力は曜日ごとに変わるため、日が変わるたびにrefreshDayCapacities()
+    // で再計算する（下のティックループ内、曜日境界で呼び出す）。不足時の警告は週1回のみ。
+    var kitchenCapPerTick = 0, serviceCapPerTick = 0, choresCapPerTick = 0;
+    var kitchenWarnLogged = false, serviceWarnLogged = false;
+    function refreshDayCapacities(dayIdx) {
+      kitchenCapPerTick = staffCapacity("cooking", dayIdx) * CAPACITY_MULT;
+      serviceCapPerTick = staffCapacity("service", dayIdx) * CAPACITY_MULT;
+      choresCapPerTick = staffCapacity("chores", dayIdx) * CAPACITY_MULT;
+      if (kitchenCapPerTick < 2.5 && !kitchenWarnLogged) {
+        kitchenWarnLogged = true;
+        pushLog("⚠️", "調理担当の手が足りていない。注文をさばき切れなそうだ…", "warn");
+      }
+      if (serviceCapPerTick < 2.5 && !serviceWarnLogged) {
+        serviceWarnLogged = true;
+        pushLog("⚠️", "接客担当の手が足りていない。案内が遅れそうだ…", "warn");
+      }
     }
-    if (serviceCapPerTick < 2.5) {
-      pushLog("⚠️", "接客担当の手が足りていない。案内が遅れそうだ…", "warn");
-    }
+    refreshDayCapacities(0); // 月曜分（週の代表値として、後述の来客数・我慢強さ計算にも使う）
 
     // ---- 来客数の決定 ----
     var reputationFactor = Random.clamp(state.reputation / 50, 0.4, 1.8);
     var totalCustomers = Math.round(BASE_WEEKLY_TRAFFIC * reputationFactor * conditions.trafficMult * Random.randRange(0.9, 1.1));
+    // 「呼込」担当がいると、その週の客足がわずかに増える（曜日ごとの稼働量の合計を反映）
+    var callingWeeklyCap = 0;
+    for (var callDay = 0; callDay < 7; callDay++) {
+      callingWeeklyCap += staffCapacity("calling", callDay);
+    }
+    var callingBoost = 1 + Random.clamp(callingWeeklyCap, 0, 20) * 0.01; // 最大+20%程度
+    totalCustomers = Math.round(totalCustomers * callingBoost);
     totalCustomers = Math.max(10, totalCustomers);
 
     // 客の「我慢強さ」平均耐性（ティック単位）。サービス能力が高いと体感待ち時間が減る。
@@ -387,6 +417,7 @@ Game.Core = Game.Core || {};
       if (dayBoundaryIdx !== -1) {
         currentDay = 1 + dayBoundaryIdx; // 月=1 … 日=7
         pushLog("📅", "―― " + DAY_NAMES[dayBoundaryIdx] + "曜日 ――", "day");
+        refreshDayCapacities(dayBoundaryIdx); // その曜日のシフト（workDaysMask）に応じて処理能力を再計算
       }
 
       var arrivals = arrivalsPerTick[tick];
@@ -501,9 +532,9 @@ Game.Core = Game.Core || {};
         );
       }
 
-      // スタッフの疲労／回復ドリフト（軽微）。「その他」担当がいるとフォローに入り疲労が和らぐ。
+      // スタッフの疲労／回復ドリフト（軽微）。「雑務」担当がいるとフォローに入り疲労が和らぐ。
       if (tick % 5 === 4) {
-        var burnoutRelief = Random.clamp(otherCapPerTick * 0.15, 0, 1);
+        var burnoutRelief = Random.clamp(choresCapPerTick * 0.15, 0, 1);
         state.staff.forEach(function (s) {
           if (s.workDays <= 0) return;
           if (queue.length > 6) {
@@ -565,16 +596,19 @@ Game.Core = Game.Core || {};
       pushLog("📉", "対応しきれなかった客が多く、評判が下がってしまった。", "bad");
     }
 
-    // ---- スタッフの成長／モチベーション回復（マネジメント配分） ----
+    // ---- スタッフの成長／モチベーション回復（個人ごとのマネジメント方針） ----
+    // 2026-09-22（シフト改修）: 全体共通の3項目スライダー（state.management）を廃止し、
+    // スタッフ1人ごとに「重視：業務指導 ⟷ やる気回復」の2軸（managementFocus）を
+    // 設定できるようにした（子画面＝スタッフ詳細モーダルで設定）。
     var mgmtLvl = skillLevel(state, "management");
     var mgmtSkillMult = (1 + mgmtLvl * 0.1) * managementEffMult;
     state.staff.forEach(function (s) {
       if (s.workDays <= 0) return;
-      var moraleGain = (state.management.morale / 100) * 6 * mgmtSkillMult;
+      var focus = s.managementFocus || { guidance: 50, morale: 50 };
+      var moraleGain = (focus.morale / 100) * 6 * mgmtSkillMult;
       s.motivation = Random.clamp(s.motivation + moraleGain - 2, 0, 100);
 
-      var growthAlloc = s.role === "cooking" ? state.management.cooking : s.role === "service" ? state.management.service : (state.management.cooking + state.management.service) / 4;
-      var growth = (growthAlloc / 100) * 1.2 * mgmtSkillMult;
+      var growth = (focus.guidance / 100) * 1.2 * mgmtSkillMult;
       s.ability = Random.clamp(s.ability + growth, 0, 100);
     });
 
@@ -585,6 +619,7 @@ Game.Core = Game.Core || {};
 
     var result = {
       week: state.week,
+      playedWeekForesight: playedWeekForesight,
       revenue: stats.revenue,
       profit: profit,
       served: stats.served,
@@ -644,7 +679,7 @@ Game.Core = Game.Core || {};
         state.currentGoal = Game.Core.Goals.generateGoal(state, state.milestoneIndex);
       }
       state.currentWeekConditions = generateWeekConditions(state);
-      state.currentWeekForesight = getDailyForesight(state);
+      state.currentWeekForesight = getWeekForesight(state);
     }
 
     return { beats: beats, result: result };
@@ -654,7 +689,7 @@ Game.Core = Game.Core || {};
     generateWeekConditions: generateWeekConditions,
     getForesightHint: getForesightHint,
     getHyakuganHint: getHyakuganHint,
-    getDailyForesight: getDailyForesight,
+    getWeekForesight: getWeekForesight,
     runWeek: runWeek,
   };
 })();

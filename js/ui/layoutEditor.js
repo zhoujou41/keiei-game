@@ -25,7 +25,7 @@ Game.UI = Game.UI || {};
       byCategory[o.category] = byCategory[o.category] || [];
       byCategory[o.category].push(o);
     });
-    var catLabels = { kitchen: "🍳 厨房設備", service: "💰 サービス", table: "🍽️ テーブル", prop: "🪴 小物" };
+    var catLabels = { kitchen: "🍳 厨房設備", counter: "🛎️ 受け渡し", service: "💰 サービス", table: "🍽️ テーブル", prop: "🪴 小物" };
 
     var html = "";
     Object.keys(catLabels).forEach(function (cat) {

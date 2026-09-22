@@ -36,6 +36,11 @@
   <main id="screen-office" class="screen active">
 
     <section class="panel">
+      <h2>🎯 今週の試練</h2>
+      <div id="office-goal"></div>
+    </section>
+
+    <section class="panel">
       <h2>🔮 今週の未来視</h2>
       <div class="muted small" style="margin-bottom:8px;">
         あくまで抽象的な予兆です。具体的な正解は教えてくれません。ここから何を仕入れ、
@@ -55,18 +60,8 @@
     </section>
 
     <section class="panel">
-      <h2>🧭 マネジメント方針</h2>
-      <div id="office-management"></div>
-    </section>
-
-    <section class="panel">
       <h2>✨ スキル</h2>
       <div id="office-skills"></div>
-    </section>
-
-    <section class="panel">
-      <h2>🎯 経営目標</h2>
-      <div id="office-goal"></div>
     </section>
 
     <section class="panel">
@@ -96,24 +91,19 @@
   </main>
 
   <!-- ============ FIELD 画面 ============ -->
+  <!-- 2026-09-22（フィールド全面改修）: モバイルで1画面に収まるよう、日タブ・未来視・
+       ログ（複数行）・提供/離脱チップ等を廃止し、「伸びる進捗バー（クリックでその日へ
+       ジャンプ）」「商品ごとの販売/仕入・利益」「直近1行だけのログ」に集約した。 -->
   <main id="screen-field" class="screen">
-    <section class="panel">
-      <h2>店舗の様子</h2>
-      <div id="field-day-tabs"></div>
-      <div id="field-foresight"></div>
+    <section class="panel field-panel">
+      <div id="field-progress-bar"></div>
       <div id="scene-container"></div>
-      <div id="field-status-row"></div>
-    </section>
-
-    <section class="panel">
-      <h3 style="margin-bottom:8px;">営業ログ</h3>
-      <div id="field-log"></div>
+      <div id="field-item-stats"></div>
+      <div id="field-log-mini"></div>
       <div id="field-controls">
-        <button class="btn" id="field-btn-prevday">◀ 前の日</button>
         <button class="btn" id="field-btn-play">▶ 再生</button>
-        <button class="btn" id="field-btn-speed">⏩ 倍速</button>
-        <button class="btn" id="field-btn-nextday">次の日 ▶</button>
-        <button class="btn" id="field-btn-skip">⏭ 結果を見る</button>
+        <button class="btn" id="field-btn-speed">⏩ x1</button>
+        <button class="btn" id="field-btn-skip">⏭ 結果</button>
       </div>
       <div id="field-result"></div>
     </section>
@@ -131,6 +121,9 @@
   <p id="gameover-week"></p>
   <button class="btn btn-primary" id="btn-restart">最初からやり直す</button>
 </div>
+
+<!-- スタッフ詳細の子画面（名前クリックで開く）。中身はjs/ui/office.jsが描画する。 -->
+<div id="staff-modal" class="modal-overlay"></div>
 
 <!-- ==== スクリプト（依存関係の順に読み込み。ESモジュールは使わずfile://でも動く構成） ==== -->
 <script src="js/core/random.js"></script>

@@ -27,8 +27,8 @@ Game.Core = Game.Core || {};
       var aptitude = {
         cooking: Random.randInt(20, 90),
         service: Random.randInt(20, 90),
-        register: Random.randInt(20, 90),
-        other: Random.randInt(20, 90),
+        calling: Random.randInt(20, 90),
+        chores: Random.randInt(20, 90),
       };
       candidates.push({
         id: "cand_" + Date.now() + "_" + i,
@@ -46,7 +46,7 @@ Game.Core = Game.Core || {};
 
   function hiringCost(candidate) {
     var avgApt =
-      (candidate.aptitude.cooking + candidate.aptitude.service + candidate.aptitude.register + candidate.aptitude.other) / 4;
+      (candidate.aptitude.cooking + candidate.aptitude.service + candidate.aptitude.calling + candidate.aptitude.chores) / 4;
     return Math.round(candidate.ability * 700 + avgApt * 250);
   }
 
